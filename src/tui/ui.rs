@@ -1,402 +1,410 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::model::{format_age, format_bytes, FileCategory};
-use crate::tui::{ActiveTab, CleanupSubView, InputMode, TuiApp};
+use crate::tui::{FocusPane, ModalState, SidebarItem, TuiApp, QUICK_CARDS};
 
-fn category_color(cat: FileCategory) -> Color {
+const BORDER_IDLE: Color = Color::Rgb(52, 56, 64);
+const BORDER_FOCUS: Color = Color::Rgb(115, 125, 140);
+const TEXT_MAIN: Color = Color::Rgb(236, 239, 244);
+const TEXT_MUTED: Color = Color::Rgb(120, 128, 140);
+const TEXT_DIM: Color = Color::Rgb(85, 92, 105);
+const ACCENT_MINT: Color = Color::Rgb(78, 205, 164);
+const ACCENT_CORAL: Color = Color::Rgb(242, 109, 109);
+const ACCENT_AMBER: Color = Color::Rgb(240, 185, 75);
+const ACCENT_BLUE: Color = Color::Rgb(105, 165, 245);
+const ACCENT_PURPLE: Color = Color::Rgb(178, 132, 240);
+
+fn card_accent(cat: FileCategory) -> Color {
     match cat {
-        FileCategory::Video => Color::LightRed,
-        FileCategory::Image => Color::LightMagenta,
-        FileCategory::Audio => Color::LightCyan,
-        FileCategory::Document => Color::LightBlue,
-        FileCategory::Archive => Color::LightYellow,
-        FileCategory::Installer => Color::LightGreen,
-        FileCategory::CacheTemp => Color::DarkGray,
-        FileCategory::CodeData => Color::Cyan,
-        FileCategory::Other => Color::Gray,
+        FileCategory::Video => ACCENT_CORAL,
+        FileCategory::Image => ACCENT_AMBER,
+        FileCategory::Installer => ACCENT_MINT,
+        FileCategory::Document => ACCENT_BLUE,
+        FileCategory::CacheTemp => ACCENT_PURPLE,
+        FileCategory::Audio => ACCENT_PURPLE,
+        FileCategory::Archive => ACCENT_AMBER,
+        FileCategory::CodeData => ACCENT_BLUE,
+        FileCategory::Other => TEXT_MUTED,
     }
 }
 
 pub fn draw_dashboard(f: &mut Frame<'_>, app: &mut TuiApp) {
-    let chunks = Layout::default()
+    let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Top Header & Metrics
-            Constraint::Length(3), // Tab Navigation Bar
-            Constraint::Min(10),   // Main Active Tab Body
-            Constraint::Length(3), // Bottom Status & Shortcuts
+            Constraint::Length(2), // Minimal 1-line top bar + padding
+            Constraint::Min(10),   // 2-Pane workspace (Sidebar + Main View)
+            Constraint::Length(1), // Minimal 1-line footer
         ])
         .split(f.area());
 
-    draw_header(f, app, chunks[0]);
-    draw_tab_bar(f, app, chunks[1]);
+    draw_top_bar(f, app, rows[0]);
 
-    match app.active_tab {
-        ActiveTab::SmartFilter => draw_smart_filter_tab(f, app, chunks[2]),
-        ActiveTab::Treemap => draw_treemap_tab(f, app, chunks[2]),
-        ActiveTab::DuplicatesJunk => draw_duplicates_junk_tab(f, app, chunks[2]),
-        ActiveTab::CleanupQueue => draw_cleanup_queue_tab(f, app, chunks[2]),
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(28), Constraint::Min(36)])
+        .split(rows[1]);
+
+    draw_sidebar(f, app, panes[0]);
+
+    if app.active_sidebar == SidebarItem::VisualMap {
+        draw_visual_map_pane(f, app, panes[1]);
+    } else {
+        draw_file_list_pane(f, app, panes[1]);
     }
 
-    draw_footer(f, app, chunks[3]);
+    draw_footer_bar(f, app, rows[2]);
 
-    // Modal overlays for tag adding or delete confirmation
-    match app.input_mode {
-        InputMode::AddingCustomTag => draw_tag_modal(f, app),
-        InputMode::ConfirmDelete { permanent } => draw_confirm_delete_modal(f, app, permanent),
-        _ => {}
+    // Centered Modals (Quick Actions palette or Confirm Clean)
+    match app.modal {
+        ModalState::QuickActions {
+            action_cursor,
+            card_cursor,
+        } => draw_quick_actions_modal(f, app, action_cursor, card_cursor),
+        ModalState::ConfirmClean { permanent } => draw_confirm_clean_modal(f, app, permanent),
+        ModalState::None => {}
     }
 }
 
-fn draw_header(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let total = format_bytes(app.total_bytes());
-    let reclaimable = format_bytes(app.safe_reclaimable_bytes());
-    let staged = format_bytes(app.staged_bytes());
-    let cleaned = format_bytes(app.reclaimed_bytes);
-
-    let line = Line::from(vec![
-        Span::styled(
-            " STORAGE+ ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("[{}]", app.target_kind.label()),
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(" {} ", app.target_label)),
-        Span::styled("| Total: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(total, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::styled(" | Safe Junk+Dups: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            reclaimable,
-            Style::default()
-                .fg(Color::LightYellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" | Staged: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("{} ({})", staged, app.staged_ids.len()),
-            Style::default()
-                .fg(Color::LightRed)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" | Freed: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            cleaned,
-            Style::default()
-                .fg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-    f.render_widget(Paragraph::new(line).block(block), area);
-}
-
-fn draw_tab_bar(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let tabs = [
-        (ActiveTab::SmartFilter, " [1] Smart Filter & NLP Search "),
-        (ActiveTab::Treemap, " [2] Space Treemap & Chart "),
-        (ActiveTab::DuplicatesJunk, " [3] Duplicates & Clutter "),
-        (
-            ActiveTab::CleanupQueue,
-            &format!(" [4] Cleanup Queue ({}) & USB Devices ", app.staged_ids.len()),
-        ),
-    ];
-
-    let mut spans = Vec::new();
-    for (tab, label) in tabs {
-        if app.active_tab == tab {
-            spans.push(Span::styled(
-                label.to_string(),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::LightBlue)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled(
-                label.to_string(),
-                Style::default().fg(Color::Gray),
-            ));
-        }
-        spans.push(Span::raw("  "));
-    }
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-    f.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
-}
-
-fn draw_smart_filter_tab(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
+fn draw_top_bar(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(4), // NLP Search Input + Live Parsed Rule Tokens
-            Constraint::Min(6),    // Matched Files Table
-            Constraint::Length(4), // Highlighted File Inspector
+            Constraint::Percentage(36),
+            Constraint::Percentage(28),
+            Constraint::Percentage(36),
         ])
         .split(area);
 
-    // 1. Search Box + Live Parsed Tokens
-    let is_editing = app.input_mode == InputMode::EditingQuery;
-    let query_display = if app.rule.search_query.is_empty() && !is_editing {
-        "Press '/' to search (e.g. \"find old unused videos over 100mb\" or \"whatsapp files > 10mb\")"
-            .to_string()
-    } else if is_editing {
-        format!("{}█", app.rule.search_query)
-    } else {
-        app.rule.search_query.clone()
-    };
+    let short_target = app
+        .target_label
+        .rsplit(['\\', '/'])
+        .find(|s| !s.is_empty())
+        .unwrap_or(&app.target_label);
 
-    let mut token_spans = vec![Span::styled(
-        "Parsed Rules: ",
-        Style::default().fg(Color::DarkGray),
-    )];
-    if app.nlp_result.tokens.is_empty()
-        && app.rule.categories.is_empty()
-        && app.nlp_result.remaining_keywords.is_empty()
-    {
-        token_spans.push(Span::styled(
-            "[All Files - No active filter constraints]",
-            Style::default().fg(Color::Gray),
-        ));
+    let left = Line::from(vec![
+        Span::styled(
+            "  splus ",
+            Style::default().fg(TEXT_MAIN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("• ", Style::default().fg(TEXT_DIM)),
+        Span::styled(short_target, Style::default().fg(TEXT_MUTED)),
+    ]);
+    f.render_widget(Paragraph::new(left), cols[0]);
+
+    let center = Line::from(vec![Span::styled(
+        " ⌕ Quick Actions / ",
+        Style::default().fg(TEXT_MAIN).bg(Color::Rgb(36, 39, 46)),
+    )]);
+    f.render_widget(
+        Paragraph::new(center).alignment(Alignment::Center),
+        cols[1],
+    );
+
+    let right_spans = if app.staged_ids.is_empty() {
+        vec![
+            Span::styled(
+                format!("{} total  ", format_bytes(app.total_bytes())),
+                Style::default().fg(TEXT_MUTED),
+            ),
+        ]
     } else {
-        for tok in &app.nlp_result.tokens {
-            token_spans.push(Span::styled(
-                format!(" [{}] ", tok.label),
+        vec![
+            Span::styled(
+                format!(
+                    "{} selected ({}) ",
+                    app.staged_ids.len(),
+                    format_bytes(app.staged_bytes())
+                ),
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::LightCyan)
+                    .fg(ACCENT_CORAL)
                     .add_modifier(Modifier::BOLD),
-            ));
-            token_spans.push(Span::raw(" "));
+            ),
+            Span::styled("↵ Clean  ", Style::default().fg(TEXT_MAIN)),
+        ]
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(right_spans)).alignment(Alignment::Right),
+        cols[2],
+    );
+}
+
+fn draw_sidebar(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let is_focused = app.focus == FocusPane::Sidebar && app.modal == ModalState::None;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if is_focused {
+            BORDER_FOCUS
+        } else {
+            BORDER_IDLE
+        }));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        " Views",
+        Style::default().fg(TEXT_DIM),
+    )));
+
+    for (idx, &item) in SidebarItem::ALL.iter().enumerate() {
+        if idx == 2 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " Quick Filters",
+                Style::default().fg(TEXT_DIM),
+            )));
         }
-        for &cat in &app.rule.categories {
-            token_spans.push(Span::styled(
-                format!(" [Cat: {}] ", cat.short_label()),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::LightYellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            token_spans.push(Span::raw(" "));
-        }
-        for kw in &app.nlp_result.remaining_keywords {
-            token_spans.push(Span::styled(
-                format!(" [Name ~ \"{}\"] ", kw),
-                Style::default().fg(Color::LightYellow),
-            ));
-        }
+
+        let is_active = app.active_sidebar == item;
+        let is_cursor = app.sidebar_cursor == idx && is_focused;
+        let dot = if is_active { " ● " } else { "   " };
+
+        let size_str = if item == SidebarItem::VisualMap {
+            String::new()
+        } else {
+            format_bytes(app.sidebar_item_bytes(item))
+        };
+
+        let label = item.label();
+        let pad_len = (inner.width as usize)
+            .saturating_sub(dot.chars().count() + label.len() + size_str.len() + 1);
+        let spaces = " ".repeat(pad_len);
+
+        let row_style = if is_cursor {
+            Style::default()
+                .fg(TEXT_MAIN)
+                .bg(Color::Rgb(42, 46, 54))
+                .add_modifier(Modifier::BOLD)
+        } else if is_active {
+            Style::default().fg(TEXT_MAIN).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT_MUTED)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                dot,
+                if is_active {
+                    Style::default().fg(ACCENT_MINT)
+                } else {
+                    row_style
+                },
+            ),
+            Span::styled(label, row_style),
+            Span::styled(spaces, row_style),
+            Span::styled(
+                format!("{} ", size_str),
+                if is_cursor {
+                    row_style
+                } else {
+                    Style::default().fg(TEXT_DIM)
+                },
+            ),
+        ]));
     }
 
-    let search_block = Block::default()
-        .title(if is_editing {
-            " Offline Natural Language Filter (TYPING - Enter/Esc to apply, Ctrl+U to clear) "
-        } else {
-            " Offline Natural Language Filter (100% Local Engine • Zero AI API) "
-        })
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Devices",
+        Style::default().fg(TEXT_DIM),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled(" ● ", Style::default().fg(ACCENT_MINT)),
+        Span::styled(app.target_kind.label(), Style::default().fg(TEXT_MAIN)),
+    ]));
+    for dev in app.android_devices.iter().take(2) {
+        lines.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled(&dev.name, Style::default().fg(TEXT_MUTED)),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_file_list_pane(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let is_focused = app.focus == FocusPane::Main && app.modal == ModalState::None;
+    let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(if is_editing {
-            Style::default().fg(Color::LightCyan)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if is_focused {
+            BORDER_FOCUS
         } else {
-            Style::default().fg(Color::Blue)
-        });
+            BORDER_IDLE
+        }));
 
-    let search_para = Paragraph::new(vec![
-        Line::from(Span::styled(
-            format!(" 🔍 {}", query_display),
-            Style::default().fg(if is_editing {
-                Color::LightCyan
-            } else {
-                Color::White
-            }),
-        )),
-        Line::from(token_spans),
-    ])
-    .block(search_block);
-    f.render_widget(search_para, layout[0]);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    // 2. Matched Files Table
-    let table_title = format!(
-        " Matched Files: {} ({}) • Sort: {} [Press 's' Sort | 'p' Preset | 'c' Category | 'r' Reset] ",
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Clean prompt header bar
+            Constraint::Min(4),    // Spacious 2-line file list
+        ])
+        .split(inner);
+
+    // 1. Clean Prompt Header Bar (inspired by `> Sure! ...` in Screenshot #2)
+    let title_text = if !app.rule.search_query.is_empty() {
+        format!(" > {}", app.rule.search_query)
+    } else {
+        format!(" > {}", app.active_sidebar.label())
+    };
+    let right_meta = format!(
+        "{} items ({}) • {} ",
         app.matched_indices.len(),
         format_bytes(app.matched_bytes),
         app.rule.sort_by.label()
     );
 
-    let header = Row::new(vec!["Stage", "Size", "Age", "Type", "Folder", "Name & Smart Tags"])
-        .style(
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        );
+    let pad = (chunks[0].width as usize)
+        .saturating_sub(title_text.chars().count() + right_meta.chars().count());
+    let prompt_line = Line::from(vec![
+        Span::styled(
+            title_text,
+            Style::default().fg(TEXT_MAIN).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(right_meta, Style::default().fg(TEXT_MUTED)),
+    ]);
+    f.render_widget(
+        Paragraph::new(prompt_line). style(Style::default().bg(Color::Rgb(28, 30, 36))),
+        chunks[0],
+    );
 
-    let visible_rows = layout[1].height.saturating_sub(3) as usize;
-    let start_idx = if app.filter_cursor >= visible_rows && visible_rows > 0 {
-        app.filter_cursor + 1 - visible_rows
+    // 2. Spacious 2-line File List
+    if app.matched_indices.is_empty() {
+        let empty = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "   No files match this filter.",
+                Style::default().fg(TEXT_MUTED),
+            )),
+            Line::from(Span::styled(
+                "   Press '/' to search or choose another filter on the left.",
+                Style::default().fg(TEXT_DIM),
+            )),
+        ]);
+        f.render_widget(empty, chunks[1]);
+        return;
+    }
+
+    let items_per_screen = (chunks[1].height as usize / 2).max(1);
+    let start_idx = if app.list_cursor >= items_per_screen {
+        app.list_cursor + 1 - items_per_screen
     } else {
         0
     };
 
-    let rows: Vec<Row<'_>> = app
+    let list_items: Vec<ListItem<'_>> = app
         .matched_indices
         .iter()
         .enumerate()
         .skip(start_idx)
-        .take(visible_rows.max(1))
+        .take(items_per_screen)
         .map(|(row_i, &entry_idx)| {
             let e = &app.entries[entry_idx];
+            let is_cursor = row_i == app.list_cursor && is_focused;
             let is_staged = app.staged_ids.contains(&e.id);
-            let is_cursor = row_i == app.filter_cursor;
 
-            let mark = if e.whitelisted {
-                " [SAFE]"
+            let icon = if e.whitelisted {
+                Span::styled(" ★  ", Style::default().fg(ACCENT_AMBER))
             } else if is_staged {
-                " [✓]   "
+                Span::styled(" ●  ", Style::default().fg(ACCENT_CORAL))
             } else {
-                " [ ]   "
+                Span::styled(" ○  ", Style::default().fg(TEXT_DIM))
             };
 
-            let tags_str: String = e
+            let tag_str = e
                 .auto_tags
-                .iter()
-                .map(|t| t.tag_str())
-                .chain(e.custom_tags.iter().map(|ct| ct.as_str()))
-                .collect::<Vec<_>>()
-                .join(" ");
+                .first()
+                .map(|t| format!("  {}", t.tag_str()))
+                .unwrap_or_default();
 
-            let name_col = if tags_str.is_empty() {
-                e.name.clone()
-            } else {
-                format!("{}  {}", e.name, tags_str)
-            };
+            let size_str = format!("{} ", format_bytes(e.size_bytes));
+            let used_w = 4 + e.name.chars().count() + tag_str.chars().count() + size_str.len();
+            let pad_w = (chunks[1].width as usize).saturating_sub(used_w);
 
-            let style = if is_cursor {
+            let name_style = if is_cursor {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::LightCyan)
+                    .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else if is_staged {
-                Style::default().fg(Color::LightRed)
-            } else if e.whitelisted {
-                Style::default().fg(Color::LightGreen)
+                Style::default().fg(ACCENT_CORAL)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(TEXT_MAIN)
             };
 
-            Row::new(vec![
-                mark.to_string(),
-                format_bytes(e.size_bytes),
-                format_age(e.days_old(app.now_unix)),
-                e.category.short_label().to_string(),
-                e.parent_folder.clone(),
-                name_col,
-            ])
-            .style(style)
+            let row_bg = if is_cursor {
+                Style::default().bg(Color::Rgb(36, 40, 48))
+            } else {
+                Style::default()
+            };
+
+            let line1 = Line::from(vec![
+                icon,
+                Span::styled(&e.name, name_style),
+                Span::styled(tag_str, Style::default().fg(ACCENT_BLUE)),
+                Span::raw(" ".repeat(pad_w)),
+                Span::styled(
+                    size_str,
+                    Style::default()
+                        .fg(if is_staged { ACCENT_CORAL } else { TEXT_MAIN })
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+
+            let sub_text = format!(
+                "    {} • {}",
+                e.parent_folder,
+                format_age(e.days_old(app.now_unix))
+            );
+            let line2 = Line::from(Span::styled(sub_text, Style::default().fg(TEXT_DIM)));
+
+            ListItem::new(vec![line1, line2]).style(row_bg)
         })
         .collect();
 
-    let widths = [
-        Constraint::Length(7),
-        Constraint::Length(10),
-        Constraint::Length(9),
-        Constraint::Length(10),
-        Constraint::Length(22),
-        Constraint::Min(25),
-    ];
-
-    let table = Table::new(rows, widths).header(header).block(
-        Block::default()
-            .title(table_title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
-    f.render_widget(table, layout[1]);
-
-    // 3. Bottom File Inspector
-    let inspector_lines = if let Some(e) = app.highlighted_filter_entry() {
-        let auto_desc: Vec<String> = e
-            .auto_tags
-            .iter()
-            .map(|t| format!("{} ({})", t.tag_str(), t.description()))
-            .collect();
-        let hash_str = e.content_hash.as_deref().unwrap_or("unhashed (unique size)");
-        vec![
-            Line::from(vec![
-                Span::styled(" Path: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(&e.path, Style::default().fg(Color::White)),
-                Span::styled("  | Hash: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    &hash_str[..hash_str.len().min(16)],
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(" Auto-Tags: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    if auto_desc.is_empty() {
-                        "None".to_string()
-                    } else {
-                        auto_desc.join(" • ")
-                    },
-                    Style::default().fg(Color::LightMagenta),
-                ),
-            ]),
-        ]
-    } else {
-        vec![Line::from(" No matching files selected.")]
-    };
-
-    let inspector = Paragraph::new(inspector_lines).block(
-        Block::default()
-            .title(" File Inspector [Press 'w' Protect/Whitelist | 't' Add Custom Tag | 'Space' Stage | 'a' Stage All] ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
-    f.render_widget(inspector, layout[2]);
+    f.render_widget(List::new(list_items), chunks[1]);
 }
 
-fn draw_treemap_tab(f: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
-        .split(area);
+fn draw_visual_map_pane(f: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
+    let is_focused = app.focus == FocusPane::Main && app.modal == ModalState::None;
+    let title = if let Some(cat) = app.drilldown_category {
+        format!(" Visual Map • {} (Backspace to zoom out) ", cat.label())
+    } else if let Some(ref fld) = app.drilldown_folder {
+        format!(" Visual Map • {} (Backspace to zoom out) ", fld)
+    } else {
+        format!(
+            " Visual Map • {} (Press 'g' to switch view, Enter to zoom in) ",
+            app.treemap_mode.label()
+        )
+    };
 
-    let canvas_block = Block::default()
-        .title(format!(
-            " Interactive 2D Space Treemap ({}) [Press 'g' Group Mode | 'Enter' Drill Down | 'Backspace' Reset Zoom] ",
-            if let Some(cat) = app.drilldown_category {
-                format!("Zoomed: {}", cat.label())
-            } else if let Some(ref fld) = app.drilldown_folder {
-                format!("Zoomed: {}", fld)
-            } else {
-                app.treemap_mode.label().to_string()
-            }
-        ))
+    let block = Block::default()
+        .title(Span::styled(title, Style::default().fg(TEXT_MUTED)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue));
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if is_focused {
+            BORDER_FOCUS
+        } else {
+            BORDER_IDLE
+        }));
 
-    let inner = canvas_block.inner(cols[0]);
-    f.render_widget(canvas_block, cols[0]);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
     app.update_treemap_rects(inner.width, inner.height);
 
     for (idx, rect) in app.last_treemap_rects.iter().enumerate() {
-        if rect.w < 2 || rect.h < 2 {
+        if rect.w < 3 || rect.h < 2 {
             continue;
         }
         let rx = inner.x.saturating_add(rect.x);
@@ -408,383 +416,329 @@ fn draw_treemap_tab(f: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         }
 
         let r_area = Rect::new(rx, ry, rw, rh);
-        let is_cursor = idx == app.treemap_cursor;
+        let is_cursor = idx == app.treemap_cursor && is_focused;
         let is_staged = rect
             .entry_id
             .map(|id| app.staged_ids.contains(&id))
             .unwrap_or(false);
 
-        let border_color = if is_cursor {
-            Color::White
-        } else if is_staged {
-            Color::LightRed
+        let accent = if is_staged {
+            ACCENT_CORAL
         } else if let Some(cat) = rect.category {
-            category_color(cat)
+            card_accent(cat)
         } else {
-            Color::Cyan
+            ACCENT_BLUE
         };
 
-        let title = format!(" {} ({:.0}%) ", rect.label, rect.percentage);
         let b = Block::default()
-            .title(title)
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(if is_cursor {
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(TEXT_MAIN)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(border_color)
+                Style::default().fg(accent)
             });
 
-        let text = Paragraph::new(vec![Line::from(Span::styled(
-            &rect.sublabel,
-            Style::default().fg(if is_cursor {
-                Color::Yellow
-            } else {
-                Color::Gray
-            }),
-        ))])
+        let content = Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!(" {}", rect.label),
+                Style::default()
+                    .fg(if is_cursor { Color::White } else { TEXT_MAIN })
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!(" {} ({:.0}%)", format_bytes(rect.size_bytes), rect.percentage),
+                Style::default().fg(TEXT_MUTED),
+            )),
+        ])
         .block(b);
-        f.render_widget(text, r_area);
-    }
 
-    // Right column: Legend & Block List
-    let items: Vec<ListItem<'_>> = app
-        .last_treemap_rects
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            let selected = i == app.treemap_cursor;
-            let style = if selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            ListItem::new(Line::from(Span::styled(
-                format!(
-                    "{:>5.1}% | {:>9} | {}",
-                    r.percentage,
-                    format_bytes(r.size_bytes),
-                    r.label
-                ),
-                style,
-            )))
-        })
-        .collect();
-
-    let list = List::new(items).block(
-        Block::default()
-            .title(" Treemap Blocks (↑/↓ to select) ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
-    f.render_widget(list, cols[1]);
-}
-
-fn draw_duplicates_junk_tab(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(6)])
-        .split(area);
-
-    let sub_header = Line::from(vec![
-        Span::styled(
-            if app.cleanup_subview == CleanupSubView::JunkBuckets {
-                " [Clutter & Junk Buckets] "
-            } else {
-                "  Clutter & Junk Buckets  "
-            },
-            if app.cleanup_subview == CleanupSubView::JunkBuckets {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            },
-        ),
-        Span::raw("   "),
-        Span::styled(
-            if app.cleanup_subview == CleanupSubView::DuplicateClusters {
-                " [Duplicate & Burst Clusters] "
-            } else {
-                "  Duplicate & Burst Clusters  "
-            },
-            if app.cleanup_subview == CleanupSubView::DuplicateClusters {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::LightYellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            },
-        ),
-        Span::raw("    Press 'v' to switch mode | Press 'x' for 1-Tap Smart Auto-Select | 'Space' to toggle group"),
-    ]);
-
-    f.render_widget(
-        Paragraph::new(sub_header).block(Block::default().borders(Borders::ALL)),
-        layout[0],
-    );
-
-    match app.cleanup_subview {
-        CleanupSubView::JunkBuckets => {
-            let items: Vec<ListItem<'_>> = app
-                .junk_buckets
-                .iter()
-                .enumerate()
-                .map(|(i, b)| {
-                    let is_cur = i == app.junk_cursor;
-                    let staged_count = b
-                        .entry_ids
-                        .iter()
-                        .filter(|id| app.staged_ids.contains(id))
-                        .count();
-                    let style = if is_cur {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::LightCyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
-                    ListItem::new(vec![
-                        Line::from(Span::styled(
-                            format!(
-                                " [{} / {} staged] {:<34} {:>10}   {}",
-                                staged_count,
-                                b.entry_ids.len(),
-                                b.title,
-                                format_bytes(b.total_bytes),
-                                b.safety.badge()
-                            ),
-                            style,
-                        )),
-                        Line::from(Span::styled(
-                            format!("     └─ {}", b.subtitle),
-                            Style::default().fg(Color::DarkGray),
-                        )),
-                    ])
-                })
-                .collect();
-
-            let list = List::new(items).block(
-                Block::default()
-                    .title(" Detected Clutter Buckets ")
-                    .borders(Borders::ALL),
-            );
-            f.render_widget(list, layout[1]);
-        }
-        CleanupSubView::DuplicateClusters => {
-            let items: Vec<ListItem<'_>> = app
-                .duplicate_clusters
-                .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    let is_cur = i == app.dup_cursor;
-                    let redundant_staged = c
-                        .entry_ids
-                        .iter()
-                        .filter(|&&id| id != c.keep_id && app.staged_ids.contains(&id))
-                        .count();
-                    let style = if is_cur {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::LightYellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
-
-                    let paths_preview: Vec<String> = c
-                        .entry_ids
-                        .iter()
-                        .filter_map(|&id| app.entries.iter().find(|e| e.id == id))
-                        .map(|e| {
-                            if e.id == c.keep_id {
-                                format!("KEEP: {}", e.path)
-                            } else if app.staged_ids.contains(&e.id) {
-                                format!("STAGE[✓]: {}", e.path)
-                            } else {
-                                format!("COPY[ ]: {}", e.path)
-                            }
-                        })
-                        .collect();
-
-                    ListItem::new(vec![
-                        Line::from(Span::styled(
-                            format!(
-                                " [{} copies staged] {:<32} Wasted: {:>10}  [{}]",
-                                redundant_staged,
-                                c.title,
-                                format_bytes(c.wasted_bytes),
-                                c.reason.label()
-                            ),
-                            style,
-                        )),
-                        Line::from(Span::styled(
-                            format!("     └─ {}", paths_preview.join("  |  ")),
-                            Style::default().fg(Color::DarkGray),
-                        )),
-                    ])
-                })
-                .collect();
-
-            let list = List::new(items).block(
-                Block::default()
-                    .title(format!(
-                        " Duplicate & Burst Groups ({}) — Press 'x' to Auto-Stage All Redundant Copies ",
-                        app.duplicate_clusters.len()
-                    ))
-                    .borders(Borders::ALL),
-            );
-            f.render_widget(list, layout[1]);
-        }
+        f.render_widget(content, r_area);
     }
 }
 
-fn draw_cleanup_queue_tab(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+fn draw_footer_bar(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
         .split(area);
 
-    let staged_entries: Vec<_> = app
-        .entries
-        .iter()
-        .filter(|e| app.staged_ids.contains(&e.id))
-        .collect();
+    let left_text = if let Some(ref msg) = app.notice {
+        Span::styled(format!("  {}", msg), Style::default().fg(ACCENT_MINT))
+    } else if !app.staged_ids.is_empty() {
+        Span::styled(
+            format!(
+                "  {} selected ({}) — Press d or ↵ to clean",
+                app.staged_ids.len(),
+                format_bytes(app.staged_bytes())
+            ),
+            Style::default().fg(ACCENT_CORAL),
+        )
+    } else {
+        Span::styled(
+            format!("  {} files", app.entries.len()),
+            Style::default().fg(TEXT_DIM),
+        )
+    };
+    f.render_widget(Paragraph::new(Line::from(left_text)), cols[0]);
 
-    let items: Vec<ListItem<'_>> = staged_entries
+    let right_hints = Line::from(vec![
+        Span::styled("Tab ", Style::default().fg(TEXT_MUTED)),
+        Span::styled("Sidebar   ", Style::default().fg(TEXT_DIM)),
+        Span::styled("/ ", Style::default().fg(TEXT_MUTED)),
+        Span::styled("Quick actions   ", Style::default().fg(TEXT_DIM)),
+        Span::styled("Space ", Style::default().fg(TEXT_MUTED)),
+        Span::styled("Select   ", Style::default().fg(TEXT_DIM)),
+        Span::styled("s ", Style::default().fg(TEXT_MUTED)),
+        Span::styled("Sort   ", Style::default().fg(TEXT_DIM)),
+        Span::styled("q ", Style::default().fg(TEXT_MUTED)),
+        Span::styled("Quit  ", Style::default().fg(TEXT_DIM)),
+    ]);
+    f.render_widget(
+        Paragraph::new(right_hints).alignment(Alignment::Right),
+        cols[1],
+    );
+}
+
+/// Centered Quick Actions & Search Modal (modeled directly on Screenshot #1).
+fn draw_quick_actions_modal(
+    f: &mut Frame<'_>,
+    app: &TuiApp,
+    action_cursor: usize,
+    card_cursor: Option<usize>,
+) {
+    let area = centered_rect(64, 72, f.area());
+    f.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(BORDER_FOCUS))
+        .style(Style::default().bg(Color::Rgb(16, 17, 20)));
+
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(3), // Search input bar
+            Constraint::Length(1), // "Categories" label
+            Constraint::Length(4), // 5 horizontal category cards
+            Constraint::Length(1), // "Quick actions" label
+            Constraint::Min(8),    // Quick actions list
+            Constraint::Length(1), // Bottom hint bar
+        ])
+        .split(inner);
+
+    // 1. Search Input Box
+    let query_str = if app.rule.search_query.is_empty() {
+        "Search files or type a filter (e.g. old videos > 50mb)...".to_string()
+    } else {
+        format!("{}█", app.rule.search_query)
+    };
+    let search_style = if app.rule.search_query.is_empty() {
+        Style::default().fg(TEXT_DIM)
+    } else {
+        Style::default().fg(TEXT_MAIN)
+    };
+
+    let search_box = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(BORDER_IDLE));
+
+    let right_pills = " ↵ Run   ESC Close ";
+    let pad = (sections[0].width as usize)
+        .saturating_sub(query_str.chars().count() + right_pills.chars().count() + 6);
+    let search_line = Line::from(vec![
+        Span::styled(" ⌕ ", Style::default().fg(TEXT_MUTED)),
+        Span::styled(query_str, search_style),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(right_pills, Style::default().fg(TEXT_DIM)),
+    ]);
+    f.render_widget(Paragraph::new(search_line).block(search_box), sections[0]);
+
+    // 2. Categories Header
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " Categories (←/→ to pick)",
+            Style::default().fg(TEXT_DIM),
+        )),
+        sections[1],
+    );
+
+    // 3. 5 Horizontal Category Cards (just like "Board 1..5" in Screenshot #1)
+    let card_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+        ])
+        .split(sections[2]);
+
+    for (i, &(cat, title)) in QUICK_CARDS.iter().enumerate() {
+        let is_selected = card_cursor == Some(i);
+        let accent = card_accent(cat);
+        let bytes = app.category_bytes(cat);
+
+        let card_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(if is_selected {
+                accent
+            } else {
+                BORDER_IDLE
+            }));
+
+        let card_text = Paragraph::new(vec![
+            Line::from(Span::styled(
+                title,
+                Style::default()
+                    .fg(accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format_bytes(bytes),
+                Style::default().fg(TEXT_MUTED),
+            )),
+        ])
+        .alignment(Alignment::Center)
+        .block(card_block);
+
+        f.render_widget(card_text, card_cols[i]);
+    }
+
+    // 4. Quick Actions Header
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " Quick actions",
+            Style::default().fg(TEXT_DIM),
+        )),
+        sections[3],
+    );
+
+    // 5. Quick Actions List
+    let dup_wasted: u64 = app.duplicate_clusters.iter().map(|c| c.wasted_bytes).sum();
+    let actions = [
+        (
+            "⌕  Apply search filter",
+            if app.rule.search_query.is_empty() {
+                "Show all files in workspace".to_string()
+            } else {
+                format!(
+                    "Filter by \"{}\" ({} matches)",
+                    app.rule.search_query,
+                    app.matched_indices.len()
+                )
+            },
+        ),
+        (
+            "✦  Select extra duplicates",
+            format!(
+                "Keep original file, mark extra copies ({})",
+                format_bytes(dup_wasted)
+            ),
+        ),
+        (
+            "✦  Select safe junk",
+            "Mark temporary files, cache, and leftover installers".to_string(),
+        ),
+        (
+            "↕  Switch sort order",
+            format!("Currently sorted by: {}", app.rule.sort_by.label()),
+        ),
+        (
+            "○  Clear selection",
+            format!("Unselect all {} marked files", app.staged_ids.len()),
+        ),
+    ];
+
+    let action_items: Vec<ListItem<'_>> = actions
         .iter()
         .enumerate()
-        .map(|(i, e)| {
-            let style = if i == app.queue_cursor {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::LightRed)
-                    .add_modifier(Modifier::BOLD)
+        .map(|(i, (title, sub))| {
+            let active = card_cursor.is_none() && action_cursor == i;
+            let bg = if active {
+                Style::default().bg(Color::Rgb(32, 36, 44))
             } else {
-                Style::default().fg(Color::White)
+                Style::default()
             };
-            ListItem::new(Line::from(Span::styled(
-                format!("{:>10}  |  {}", format_bytes(e.size_bytes), e.path),
-                style,
-            )))
+            ListItem::new(vec![
+                Line::from(Span::styled(
+                    format!(" {}", title),
+                    Style::default()
+                        .fg(if active { Color::White } else { TEXT_MAIN })
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    format!("    {}", sub),
+                    Style::default().fg(TEXT_MUTED),
+                )),
+            ])
+            .style(bg)
         })
         .collect();
 
-    let queue_list = List::new(items).block(
-        Block::default()
-            .title(format!(
-                " Staged Cleanup Basket: {} files ({}) [Press 'd' Clean (Recycle/Safe) | 'D' Permanent | 'c' Clear] ",
-                staged_entries.len(),
-                format_bytes(app.staged_bytes())
-            ))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::LightRed)),
-    );
-    f.render_widget(queue_list, cols[0]);
+    f.render_widget(List::new(action_items), sections[4]);
 
-    let mut dev_lines = vec![Line::from(Span::styled(
-        " Connected Android USB Devices:",
-        Style::default()
-            .fg(Color::LightCyan)
-            .add_modifier(Modifier::BOLD),
-    ))];
-
-    if app.android_devices.is_empty() {
-        dev_lines.push(Line::from("  (No Android USB device detected)"));
-        dev_lines.push(Line::from(""));
-        dev_lines.push(Line::from("  • For MTP: Plug in USB & choose"));
-        dev_lines.push(Line::from("    'File Transfer (MTP)' on phone."));
-        dev_lines.push(Line::from("  • For ADB: Enable USB Debugging"));
-        dev_lines.push(Line::from("    or run `splus adb-setup`."));
-    } else {
-        for dev in &app.android_devices {
-            dev_lines.push(Line::from(format!(
-                "  • {} [{}] ({})",
-                dev.name,
-                dev.mode.label(),
-                dev.status
-            )));
-        }
-    }
-
-    let dev_panel = Paragraph::new(dev_lines).block(
-        Block::default()
-            .title(" Android USB Targets (ADB + MTP) ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
-    f.render_widget(dev_panel, cols[1]);
-}
-
-fn draw_footer(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let line = Line::from(vec![
+    // 6. Bottom Hint
+    let footer = Line::from(vec![
         Span::styled(
-            " STATUS ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            " Type to filter naturally (e.g. \"old videos over 100mb\")",
+            Style::default().fg(TEXT_DIM),
         ),
-        Span::raw(format!(" {} ", app.status_banner)),
-        Span::styled(
-            " | Keys: [/] NLP Search  [Tab/1-4] Views  [Space] Stage  [p] Presets  [d] Clean  [q] Quit",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::raw("      "),
+        Span::styled("↑↓ Navigate", Style::default().fg(TEXT_MUTED)),
     ]);
+    f.render_widget(Paragraph::new(footer), sections[5]);
+}
+
+fn draw_confirm_clean_modal(f: &mut Frame<'_>, app: &TuiApp, permanent: bool) {
+    let area = centered_rect(46, 24, f.area());
+    f.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-    f.render_widget(Paragraph::new(line).block(block), area);
-}
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT_CORAL))
+        .style(Style::default().bg(Color::Rgb(18, 19, 23)));
 
-fn draw_tag_modal(f: &mut Frame<'_>, app: &TuiApp) {
-    let area = centered_rect(50, 20, f.area());
-    f.render_widget(Clear, area);
-    let block = Block::default()
-        .title(" Add Custom Tag (Tip: 'keep' also Whitelists file) ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::LightCyan));
-    let p = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(format!("  Tag: #{}█", app.tag_input_buffer)),
-        Line::from(""),
-        Line::from("  Press Enter to save, Esc to cancel."),
-    ])
-    .block(block);
-    f.render_widget(p, area);
-}
-
-fn draw_confirm_delete_modal(f: &mut Frame<'_>, app: &TuiApp, permanent: bool) {
-    let area = centered_rect(60, 25, f.area());
-    f.render_widget(Clear, area);
-    let mode_label = if permanent {
-        "PERMANENT DELETE"
+    let mode_desc = if permanent {
+        "Permanently delete selected files?"
     } else {
-        "SAFE CLEANUP (Recycle Bin on Windows / Delete on Android)"
+        "Move selected files to Trash / clean?"
     };
-    let block = Block::default()
-        .title(format!(" Confirm {} ", mode_label))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::LightRed));
+
     let p = Paragraph::new(vec![
         Line::from(""),
-        Line::from(format!(
-            "  Clean {} staged files and reclaim {}?",
-            app.staged_ids.len(),
-            format_bytes(app.staged_bytes())
+        Line::from(Span::styled(
+            format!("  {}", mode_desc),
+            Style::default().fg(TEXT_MAIN).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "  {} files • {}",
+                app.staged_ids.len(),
+                format_bytes(app.staged_bytes())
+            ),
+            Style::default().fg(ACCENT_CORAL),
         )),
         Line::from(""),
-        Line::from("  Press [Y] or [Enter] to confirm, any other key to cancel."),
+        Line::from(vec![
+            Span::styled("  [↵ Confirm]", Style::default().fg(TEXT_MAIN)),
+            Span::raw("    "),
+            Span::styled("[Esc Cancel]", Style::default().fg(TEXT_MUTED)),
+        ]),
     ])
     .block(block);
+
     f.render_widget(p, area);
 }
 

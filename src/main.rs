@@ -195,6 +195,6 @@ mod tests {
         let rects = build_terminal_treemap(&entries, &all_idx, TreemapMode::Category, 80, 16, 8);
         assert!(!rects.is_empty());
         let ascii = render_ascii_treemap(&rects, 80, 16);
-        assert!(ascii.contains('┌'));
+        assert!(ascii.contains('╭'));
     }
 }

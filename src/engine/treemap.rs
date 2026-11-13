@@ -242,10 +242,10 @@ pub fn render_ascii_treemap(rects: &[TreemapRect], width: u16, height: u16) -> S
             row[x0] = '│';
             row[x1] = '│';
         }
-        grid[y0][x0] = '┌';
-        grid[y0][x1] = '┐';
-        grid[y1][x0] = '└';
-        grid[y1][x1] = '┘';
+        grid[y0][x0] = '╭';
+        grid[y0][x1] = '╮';
+        grid[y1][x0] = '╰';
+        grid[y1][x1] = '╯';
 
         let inner_w = x1.saturating_sub(x0 + 1);
         let inner_h = y1.saturating_sub(y0 + 1);

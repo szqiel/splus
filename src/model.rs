@@ -10,9 +10,9 @@ pub enum StorageTargetKind {
 impl StorageTargetKind {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::WindowsLocal => "Windows Local Disk",
-            Self::AndroidAdb => "Android USB (ADB)",
-            Self::AndroidMtp => "Android USB (MTP)",
+            Self::WindowsLocal => "This PC",
+            Self::AndroidAdb => "Phone (USB)",
+            Self::AndroidMtp => "Phone (USB)",
         }
     }
 }
@@ -46,27 +46,27 @@ impl FileCategory {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Video => "Videos",
-            Self::Image => "Photos & Images",
-            Self::Audio => "Audio & Music",
-            Self::Document => "Documents",
-            Self::Archive => "Archives & ZIPs",
-            Self::Installer => "Installers & APKs",
-            Self::CacheTemp => "Cache & Temp",
+            Self::Image => "Photos",
+            Self::Audio => "Audio",
+            Self::Document => "Docs",
+            Self::Archive => "Archives",
+            Self::Installer => "Apps & Setup",
+            Self::CacheTemp => "Temp & Cache",
             Self::CodeData => "Code & Data",
-            Self::Other => "Other Files",
+            Self::Other => "Other",
         }
     }
 
     pub fn short_label(&self) -> &'static str {
         match self {
             Self::Video => "Video",
-            Self::Image => "Image",
+            Self::Image => "Photo",
             Self::Audio => "Audio",
             Self::Document => "Doc",
-            Self::Archive => "Archive",
-            Self::Installer => "Installer",
-            Self::CacheTemp => "Cache",
-            Self::CodeData => "Code",
+            Self::Archive => "Zip",
+            Self::Installer => "App",
+            Self::CacheTemp => "Temp",
+            Self::CodeData => "Data",
             Self::Other => "Other",
         }
     }
@@ -138,33 +138,33 @@ impl AutoTag {
 
     pub fn tag_str(&self) -> &'static str {
         match self {
-            Self::Screenshot => "#screenshot",
-            Self::ScreenRecording => "#screen-recording",
-            Self::Installer => "#installer",
-            Self::CacheTemp => "#cache-temp",
-            Self::BurstPhoto => "#burst-photo",
-            Self::MessengerMedia => "#messenger-media",
-            Self::Bloated => "#bloated",
-            Self::Forgotten => "#forgotten",
-            Self::Duplicate => "#duplicate",
-            Self::EmptyFile => "#empty",
-            Self::DevArtifact => "#dev-artifact",
+            Self::Screenshot => "screenshot",
+            Self::ScreenRecording => "screen-rec",
+            Self::Installer => "installer",
+            Self::CacheTemp => "temp",
+            Self::BurstPhoto => "burst",
+            Self::MessengerMedia => "chat",
+            Self::Bloated => "large",
+            Self::Forgotten => "unused",
+            Self::Duplicate => "duplicate",
+            Self::EmptyFile => "empty",
+            Self::DevArtifact => "dev-cache",
         }
     }
 
     pub fn description(&self) -> &'static str {
         match self {
-            Self::Screenshot => "Screen capture detected by filename or folder",
-            Self::ScreenRecording => "Video capture of screen activity",
-            Self::Installer => "Setup binary, .apk, .msi, or installer archive",
-            Self::CacheTemp => "Temporary file, log, or thumbnail cache",
-            Self::BurstPhoto => "Sequential camera burst photo taken within seconds",
-            Self::MessengerMedia => "Media from WhatsApp, Telegram, Discord, or WeChat",
-            Self::Bloated => "Anomalously large file for its category",
-            Self::Forgotten => "Untouched and unopened for over 180 days",
-            Self::Duplicate => "Exact hash match or redundant renamed copy",
-            Self::EmptyFile => "Zero-byte placeholder or empty file",
-            Self::DevArtifact => "Build output or package cache (node_modules, target, .gradle)",
+            Self::Screenshot => "Screenshot",
+            Self::ScreenRecording => "Screen recording",
+            Self::Installer => "App installer or setup file",
+            Self::CacheTemp => "Temporary or cache file",
+            Self::BurstPhoto => "Similar photo taken in a burst",
+            Self::MessengerMedia => "Saved from WhatsApp, Telegram, or chat",
+            Self::Bloated => "Very large file",
+            Self::Forgotten => "Not opened in 6+ months",
+            Self::Duplicate => "Extra copy of another file",
+            Self::EmptyFile => "Empty file (0 B)",
+            Self::DevArtifact => "Project build or package cache",
         }
     }
 }
@@ -217,11 +217,11 @@ impl SortBy {
 
     pub fn label(&self) -> &'static str {
         match self {
-            Self::SizeDesc => "Largest First",
-            Self::SizeAsc => "Smallest First",
-            Self::AgeDesc => "Oldest First",
-            Self::AgeAsc => "Newest First",
-            Self::NameAsc => "Name (A-Z)",
+            Self::SizeDesc => "Largest first",
+            Self::SizeAsc => "Smallest first",
+            Self::AgeDesc => "Oldest first",
+            Self::AgeAsc => "Newest first",
+            Self::NameAsc => "Name A–Z",
         }
     }
 }
@@ -297,9 +297,9 @@ pub enum DuplicateReason {
 impl DuplicateReason {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::ExactHash => "EXACT HASH MATCH",
-            Self::RenamedCopy => "RENAMED COPY (1)",
-            Self::BurstSequence => "BURST PHOTO SERIES",
+            Self::ExactHash => "Identical file",
+            Self::RenamedCopy => "Renamed copy",
+            Self::BurstSequence => "Photo burst",
         }
     }
 }
@@ -324,9 +324,9 @@ pub enum SafetyLevel {
 impl SafetyLevel {
     pub fn badge(&self) -> &'static str {
         match self {
-            Self::Safe => "[SAFE TO CLEAN]",
-            Self::Review => "[REVIEW]",
-            Self::Caution => "[CAUTION]",
+            Self::Safe => "Safe",
+            Self::Review => "Review",
+            Self::Caution => "Careful",
         }
     }
 }
@@ -380,7 +380,7 @@ pub fn format_bytes(bytes: u64) -> String {
     } else if b >= MB {
         format!("{:.1} MB", b / MB)
     } else if b >= KB {
-        format!("{:.1} KB", b / KB)
+        format!("{:.0} KB", b / KB)
     } else {
         format!("{} B", bytes)
     }

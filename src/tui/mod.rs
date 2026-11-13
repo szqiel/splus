@@ -412,11 +412,14 @@ impl TuiApp {
 
         let mut deleted_ids = HashSet::new();
         let mut freed_bytes = 0u64;
+        let mut skipped_count = 0usize;
 
         for item in &to_delete {
             if delete_storage_entry(item, permanent).is_ok() {
                 deleted_ids.insert(item.id);
                 freed_bytes += item.size_bytes;
+            } else {
+                skipped_count += 1;
             }
         }
 
@@ -429,11 +432,25 @@ impl TuiApp {
         self.reclaimed_bytes += freed_bytes;
         self.recompute_all();
 
-        self.notice = Some(format!(
-            "Cleaned {} files ({})",
-            deleted_ids.len(),
-            format_bytes(freed_bytes)
-        ));
+        self.notice = Some(if skipped_count == 0 {
+            format!(
+                "Cleaned {} files ({})",
+                deleted_ids.len(),
+                format_bytes(freed_bytes)
+            )
+        } else if deleted_ids.is_empty() {
+            format!(
+                "Skipped {} file(s) — currently in use or requires Admin",
+                skipped_count
+            )
+        } else {
+            format!(
+                "Cleaned {} ({}) • {} skipped (in use/Admin)",
+                deleted_ids.len(),
+                format_bytes(freed_bytes),
+                skipped_count
+            )
+        });
     }
 }
 

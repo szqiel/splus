@@ -462,23 +462,62 @@ pub fn trim_windows_verbatim_prefix(p: &str) -> String {
     p.strip_prefix(r"\\?\").unwrap_or(p).to_string()
 }
 
+#[repr(C)]
+struct ShFileOpStructW {
+    hwnd: isize,
+    w_func: u32,
+    p_from: *const u16,
+    p_to: *const u16,
+    f_flags: u16,
+    f_any_operations_aborted: i32,
+    h_name_mappings: *mut core::ffi::c_void,
+    lpsz_progress_title: *const u16,
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    fn SHFileOperationW(lpFileOp: *mut ShFileOpStructW) -> i32;
+}
+
 pub fn delete_windows_file(path: &str, permanent: bool) -> Result<()> {
-    if permanent {
-        fs::remove_file(path).with_context(|| format!("Failed to remove file: {}", path))?;
-        return Ok(());
+    let clean = trim_windows_verbatim_prefix(path);
+
+    if !permanent {
+        // Native Win32 SHFileOperationW (FO_DELETE + FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT)
+        // Moves file to Windows Recycle Bin in <1ms without spawning PowerShell or printing to stderr.
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        let mut wide_from: Vec<u16> = OsStr::new(&clean).encode_wide().collect();
+        // SHFileOperationW requires double-null termination (\0\0)
+        wide_from.push(0);
+        wide_from.push(0);
+
+        let mut file_op = ShFileOpStructW {
+            hwnd: 0,
+            w_func: 3, // FO_DELETE
+            p_from: wide_from.as_ptr(),
+            p_to: std::ptr::null(),
+            f_flags: 0x0004 | 0x0010 | 0x0040 | 0x0400, // FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI
+            f_any_operations_aborted: 0,
+            h_name_mappings: std::ptr::null_mut(),
+            lpsz_progress_title: std::ptr::null(),
+        };
+
+        let ret = unsafe { SHFileOperationW(&mut file_op) };
+        if ret == 0 && file_op.f_any_operations_aborted == 0 && !Path::new(&clean).exists() {
+            return Ok(());
+        }
     }
 
-    let escaped = path.replace('\'', "''");
-    let script = format!(
-        "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('{}', 'OnlyErrorDialogs', 'SendToRecycleBin')",
-        escaped
-    );
-    let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .status();
-
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        _ => fs::remove_file(path).with_context(|| format!("Failed to delete file: {}", path)),
+    // Fallback (or permanent delete): clear read-only attribute if needed and remove directly
+    if let Ok(meta) = fs::metadata(&clean) {
+        let mut perms = meta.permissions();
+        if perms.readonly() {
+            perms.set_readonly(false);
+            let _ = fs::set_permissions(&clean, perms);
+        }
     }
+
+    fs::remove_file(&clean).with_context(|| format!("Failed to delete file: {}", clean))
 }

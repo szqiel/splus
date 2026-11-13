@@ -144,15 +144,11 @@ pub fn detect_duplicate_clusters(entries: &[StorageEntry]) -> Vec<DuplicateClust
 
     for ((_, _), mut group) in by_hash {
         if group.len() > 1 {
-            group.sort_by_key(|&i| entries[i].modified_unix);
+            group.sort_by(|&a, &b| duplicate_keep_score(&entries[b]).cmp(&duplicate_keep_score(&entries[a])));
             for &i in &group {
                 assigned.insert(i);
             }
-            let keep_idx = group
-                .iter()
-                .copied()
-                .find(|&i| entries[i].whitelisted)
-                .unwrap_or(group[0]);
+            let keep_idx = group[0];
             let total_bytes: u64 = group.iter().map(|&i| entries[i].size_bytes).sum();
             let wasted_bytes = total_bytes.saturating_sub(entries[keep_idx].size_bytes);
 
@@ -182,15 +178,11 @@ pub fn detect_duplicate_clusters(entries: &[StorageEntry]) -> Vec<DuplicateClust
 
     for ((norm_title, _), mut group) in by_norm {
         if group.len() > 1 {
-            group.sort_by_key(|&i| entries[i].modified_unix);
+            group.sort_by(|&a, &b| duplicate_keep_score(&entries[b]).cmp(&duplicate_keep_score(&entries[a])));
             for &i in &group {
                 assigned.insert(i);
             }
-            let keep_idx = group
-                .iter()
-                .copied()
-                .find(|&i| entries[i].whitelisted)
-                .unwrap_or(group[0]);
+            let keep_idx = group[0];
             let total_bytes: u64 = group.iter().map(|&i| entries[i].size_bytes).sum();
             let wasted_bytes = total_bytes.saturating_sub(entries[keep_idx].size_bytes);
 
@@ -272,6 +264,60 @@ fn push_burst_cluster(
         total_bytes,
         wasted_bytes,
     });
+}
+
+/// Scores a duplicate candidate to decide which copy to KEEP (highest score wins, all others are marked extra).
+/// - Keeps whitelisted files first.
+/// - Penalizes temp/backup/old-install/.previous paths so leftover copies are selected for deletion.
+/// - Penalizes numbered suffixes like `file (1).pdf` or `file - Copy.pdf`.
+/// - Tie-breaker: keeps the NEWEST file (`modified_unix`) and marks older copies for deletion.
+fn duplicate_keep_score(entry: &StorageEntry) -> (i32, i64) {
+    let mut score: i32 = 0;
+
+    if entry.whitelisted {
+        score += 10_000;
+    }
+
+    let lower_path = entry.path.replace('\\', "/").to_ascii_lowercase();
+    let lower_name = entry.name.to_ascii_lowercase();
+
+    // Penalize temp, old-install, .previous, backup, and installer folders so they get deleted
+    if lower_path.contains("/temp/")
+        || lower_path.contains("/tmp/")
+        || lower_path.contains("old-install")
+        || lower_path.contains(".previous")
+        || lower_path.contains("/backup")
+        || lower_path.contains("/old/")
+        || lower_path.contains("/trash")
+        || lower_path.contains(".tmp/")
+    {
+        score -= 500;
+    }
+
+    if lower_path.contains("/cache/")
+        || lower_path.contains("/.cache/")
+        || lower_path.contains("/crx_cache/")
+    {
+        score -= 100;
+    }
+
+    // Penalize numbered copy suffixes like "Report (1).pdf" or "Report - Copy.pdf"
+    if normalize_base_filename(&entry.name) != lower_name {
+        score -= 200;
+    }
+
+    // Reward active installed program or primary user folders
+    if lower_path.contains("/programs/")
+        || lower_path.contains("/program files")
+        || lower_path.contains("/documents/")
+        || lower_path.contains("/pictures/")
+        || lower_path.contains("/videos/")
+    {
+        score += 100;
+    }
+
+    // Tie-breaker: keep the NEWEST file (higher modified_unix) so older copies are selected for deletion
+    (score, entry.modified_unix)
 }
 
 /// Returns entry IDs of all redundant duplicate copies (keeping `keep_id` in each cluster).

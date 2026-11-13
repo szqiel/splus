@@ -1,5 +1,8 @@
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
@@ -7,15 +10,17 @@ use rayon::prelude::*;
 use walkdir::{DirEntry, WalkDir};
 
 use crate::model::{FileCategory, StorageEntry, StorageTargetKind};
-use crate::scanner::ScanOptions;
+use crate::scanner::ntfs_usn::try_scan_drive_root_usn_recent;
+use crate::scanner::{ScanOptions, ScanProgress};
 
 pub fn scan_windows_directory(root: &Path, max_depth: Option<usize>) -> Result<Vec<StorageEntry>> {
-    scan_windows_directory_with_options(
+    scan_windows_directory_with_progress(
         root,
         &ScanOptions {
             max_depth,
             ..Default::default()
         },
+        None,
     )
 }
 
@@ -23,21 +28,60 @@ pub fn scan_windows_directory_with_options(
     root: &Path,
     opts: &ScanOptions,
 ) -> Result<Vec<StorageEntry>> {
+    scan_windows_directory_with_progress(root, opts, None)
+}
+
+pub fn scan_windows_directory_with_progress(
+    root: &Path,
+    opts: &ScanOptions,
+    progress: Option<&Arc<ScanProgress>>,
+) -> Result<Vec<StorageEntry>> {
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let root_clean_str = trim_windows_verbatim_prefix(&root_canon.to_string_lossy());
-    let is_windows_target = root_clean_str.to_ascii_lowercase().contains("\\windows");
+    let root_lower = root_clean_str.to_ascii_lowercase();
+    let is_windows_target = root_lower.contains("\\windows");
+    let is_root_drive = is_drive_root(&root_clean_str);
     let now_unix = chrono::Utc::now().timestamp();
 
-    // Collect work roots up to depth 2 so rayon can walk large drives (like C:\) across all CPU cores in parallel
-    let work_items = collect_parallel_work_roots(&root_canon, opts, is_windows_target, now_unix);
+    // Smart Drive-Root Mode: when scanning a full drive root (like C:\) without --all,
+    // default to a 1 MB size floor so we don't waste time on 500,000 tiny 1 KB system/config files.
+    let mut effective_opts = opts.clone();
+    if is_root_drive && !opts.include_all && effective_opts.min_size_bytes.is_none() {
+        effective_opts.min_size_bytes = Some(1024 * 1024);
+    }
+
+    // Fast-path #1: If scanning a drive root with a recent filter and running as Administrator,
+    // query the NTFS MFT / USN Journal directly (< 0.5s). Falls back seamlessly if not Admin.
+    if is_root_drive && effective_opts.max_age_days.is_some() {
+        if let Some(usn_entries) =
+            try_scan_drive_root_usn_recent(&root_canon, &effective_opts, now_unix, progress)
+        {
+            return Ok(usn_entries);
+        }
+    }
+
+    // Fast-path #2: Deep breadth-first work fan-out across heavy folders (Users/<you>/AppData/Local, ProgramData, etc.)
+    let work_items = collect_parallel_work_roots(
+        &root_canon,
+        &effective_opts,
+        is_windows_target,
+        now_unix,
+        progress,
+    );
 
     let mut entries: Vec<StorageEntry> = work_items
         .into_par_iter()
         .flat_map_iter(|item| match item {
             WorkItem::SingleFile(entry) => vec![entry],
-            WorkItem::Subtree { dir, depth_used } => {
-                walk_subtree(&dir, &root_canon, depth_used, opts, is_windows_target, now_unix)
-            }
+            WorkItem::Subtree { dir, depth_used } => walk_subtree(
+                &dir,
+                &root_canon,
+                depth_used,
+                &effective_opts,
+                is_windows_target,
+                now_unix,
+                progress,
+            ),
         })
         .collect();
 
@@ -58,6 +102,7 @@ fn collect_parallel_work_roots(
     opts: &ScanOptions,
     is_windows_target: bool,
     now_unix: i64,
+    progress: Option<&Arc<ScanProgress>>,
 ) -> Vec<WorkItem> {
     let mut items = Vec::new();
     let max_d = opts.max_depth.unwrap_or(usize::MAX);
@@ -65,64 +110,93 @@ fn collect_parallel_work_roots(
         return items;
     }
 
-    let Ok(lvl1) = fs::read_dir(root_canon) else {
-        return items;
-    };
+    let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
+    queue.push_back((root_canon.to_path_buf(), 0));
 
-    for e1 in lvl1.flatten() {
-        let p1 = e1.path();
-        let Ok(ft1) = e1.file_type() else { continue };
-        if ft1.is_symlink() {
+    while let Some((curr_dir, curr_depth)) = queue.pop_front() {
+        let Ok(read_dir) = fs::read_dir(&curr_dir) else {
             continue;
-        }
-        if ft1.is_file() {
-            if let Ok(meta) = e1.metadata() {
-                if let Some(entry) =
-                    build_entry_from_meta(&p1, &meta, root_canon, opts, now_unix)
-                {
-                    items.push(WorkItem::SingleFile(entry));
+        };
+
+        for entry_res in read_dir {
+            let Ok(entry) = entry_res else { continue };
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+
+            let next_depth = curr_depth + 1;
+            if ft.is_file() {
+                if let Some(p) = progress {
+                    p.scanned_files.fetch_add(1, Ordering::Relaxed);
                 }
-            }
-        } else if ft1.is_dir() {
-            if !opts.include_system && should_skip_dir_path(&p1, is_windows_target) {
-                continue;
-            }
-            if max_d == 1 {
-                continue;
-            }
-            // Expand one more level (e.g. C:\Users\SYAIR, C:\ProgramData\Blackmagic Design) for balanced parallel threads
-            if let Ok(lvl2) = fs::read_dir(&p1) {
-                for e2 in lvl2.flatten() {
-                    let p2 = e2.path();
-                    let Ok(ft2) = e2.file_type() else { continue };
-                    if ft2.is_symlink() {
-                        continue;
+                if let Ok(meta) = entry.metadata() {
+                    if let Some(built) =
+                        build_entry_from_meta(&path, &meta, root_canon, opts, now_unix)
+                    {
+                        if let Some(p) = progress {
+                            p.matched_files.fetch_add(1, Ordering::Relaxed);
+                        }
+                        items.push(WorkItem::SingleFile(built));
                     }
-                    if ft2.is_file() {
-                        if let Ok(meta) = e2.metadata() {
-                            if let Some(entry) =
-                                build_entry_from_meta(&p2, &meta, root_canon, opts, now_unix)
-                            {
-                                items.push(WorkItem::SingleFile(entry));
-                            }
-                        }
-                    } else if ft2.is_dir() {
-                        if !opts.include_system && should_skip_dir_path(&p2, is_windows_target) {
-                            continue;
-                        }
-                        if max_d >= 2 {
-                            items.push(WorkItem::Subtree {
-                                dir: p2,
-                                depth_used: 2,
-                            });
-                        }
-                    }
+                }
+            } else if ft.is_dir() {
+                if !opts.include_system
+                    && should_skip_dir_path(&path, is_windows_target, opts.include_all)
+                {
+                    continue;
+                }
+                if next_depth >= max_d {
+                    continue;
+                }
+
+                // Expand up to depth 4 for heavy container directories (Users, <username>, AppData, Local, Roaming, ProgramData)
+                // so a single thread never gets stuck walking all of C:\Users\<username> alone.
+                if should_expand_further(&path, next_depth) {
+                    queue.push_back((path, next_depth));
+                } else {
+                    items.push(WorkItem::Subtree {
+                        dir: path,
+                        depth_used: next_depth,
+                    });
                 }
             }
         }
     }
 
     items
+}
+
+fn should_expand_further(dir: &Path, depth: usize) -> bool {
+    if depth <= 1 {
+        return true;
+    }
+    if depth >= 4 {
+        return false;
+    }
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let parent_name = dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    matches!(
+        name.as_str(),
+        "users"
+            | "appdata"
+            | "local"
+            | "roaming"
+            | "locallow"
+            | "programdata"
+            | "program files"
+            | "program files (x86)"
+            | "blackmagic design"
+    ) || parent_name == "users"
 }
 
 fn walk_subtree(
@@ -132,18 +206,33 @@ fn walk_subtree(
     opts: &ScanOptions,
     is_windows_target: bool,
     now_unix: i64,
+    progress: Option<&Arc<ScanProgress>>,
 ) -> Vec<StorageEntry> {
+    if let Some(p) = progress {
+        let label = dir
+            .strip_prefix(root_canon)
+            .unwrap_or(dir)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !label.is_empty() {
+            p.set_folder(&label);
+        }
+    }
+
     let mut walker = WalkDir::new(dir).follow_links(false);
     if let Some(max_d) = opts.max_depth {
         walker = walker.max_depth(max_d.saturating_sub(depth_used));
     }
 
     let include_system = opts.include_system;
-    walker
+    let include_all = opts.include_all;
+    let mut local_scanned = 0usize;
+
+    let res: Vec<StorageEntry> = walker
         .into_iter()
         .filter_entry(|e| {
             if e.file_type().is_dir() && !include_system {
-                !should_skip_dir_entry(e, is_windows_target)
+                !should_skip_dir_entry(e, is_windows_target, include_all)
             } else {
                 true
             }
@@ -151,15 +240,43 @@ fn walk_subtree(
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter_map(|e| {
+            local_scanned += 1;
+            if local_scanned & 0x3FF == 0 {
+                if let Some(p) = progress {
+                    p.scanned_files.fetch_add(1024, Ordering::Relaxed);
+                    if let Some(parent) = e.path().parent() {
+                        let rel = parent
+                            .strip_prefix(root_canon)
+                            .unwrap_or(parent)
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        p.set_folder(&rel);
+                    }
+                }
+            }
+
             // WalkDir on Windows caches WIN32_FIND_DATA inside DirEntry::metadata() with zero extra syscalls
             let meta = e.metadata().ok()?;
-            build_entry_from_meta(e.path(), &meta, root_canon, opts, now_unix)
+            let entry = build_entry_from_meta(e.path(), &meta, root_canon, opts, now_unix)?;
+            if let Some(p) = progress {
+                p.matched_files.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(entry)
         })
-        .collect()
+        .collect();
+
+    if let Some(p) = progress {
+        let remainder = local_scanned & 0x3FF;
+        if remainder > 0 {
+            p.scanned_files.fetch_add(remainder, Ordering::Relaxed);
+        }
+    }
+
+    res
 }
 
 #[inline]
-fn build_entry_from_meta(
+pub fn build_entry_from_meta(
     path: &Path,
     meta: &fs::Metadata,
     root_canon: &Path,
@@ -249,18 +366,18 @@ fn build_entry_from_meta(
 }
 
 #[inline]
-fn should_skip_dir_entry(entry: &DirEntry, is_windows_target: bool) -> bool {
-    should_skip_dir_path(entry.path(), is_windows_target)
+fn should_skip_dir_entry(entry: &DirEntry, is_windows_target: bool, include_all: bool) -> bool {
+    should_skip_dir_path(entry.path(), is_windows_target, include_all)
 }
 
 #[inline]
-fn should_skip_dir_path(path: &Path, is_windows_target: bool) -> bool {
+pub fn should_skip_dir_path(path: &Path, is_windows_target: bool, include_all: bool) -> bool {
     let Some(name_os) = path.file_name() else {
         return false;
     };
     let name = name_os.to_string_lossy().to_ascii_lowercase();
 
-    // Always skip protected NTFS volume traps
+    // 1. Always skip protected NTFS volume traps
     if matches!(
         name.as_str(),
         "$recycle.bin"
@@ -275,12 +392,44 @@ fn should_skip_dir_path(path: &Path, is_windows_target: bool) -> bool {
         return true;
     }
 
-    // Unless the user specifically targeted C:\Windows, skip un-deletable OS system internals
+    // 2. Unless --all is passed, skip million-file dev toolchain & browser micro-chunk traps
+    if !include_all
+        && matches!(
+            name.as_str(),
+            "node_modules"
+                | ".git"
+                | ".cargo"
+                | ".rustup"
+                | ".venv"
+                | "venv"
+                | "__pycache__"
+                | ".gradle"
+                | ".nuget"
+                | ".next"
+                | ".turbo"
+                | "code cache"
+                | "gpucache"
+                | "dawnwebgpucache"
+                | "dawngraphitecache"
+                | "service worker"
+                | "cache_data"
+                | "shadercache"
+                | "grshadercache"
+        )
+    {
+        return true;
+    }
+
+    // 3. Unless the user specifically targeted C:\Windows, skip un-deletable OS system internals
     // (while still allowing C:\Windows\Temp and C:\Windows\Prefetch to be scanned)
     if !is_windows_target {
         let full_lower = path.to_string_lossy().to_ascii_lowercase();
-        if full_lower.contains("\\windows\\") {
-            if !full_lower.contains("\\windows\\temp")
+        if full_lower == "c:\\windows"
+            || full_lower.ends_with(":\\windows")
+            || full_lower.contains("\\windows\\")
+        {
+            if !full_lower.ends_with(":\\windows")
+                && !full_lower.contains("\\windows\\temp")
                 && !full_lower.contains("\\windows\\prefetch")
             {
                 return true;
@@ -289,6 +438,11 @@ fn should_skip_dir_path(path: &Path, is_windows_target: bool) -> bool {
     }
 
     false
+}
+
+pub fn is_drive_root(clean_path: &str) -> bool {
+    let trimmed = clean_path.trim_end_matches(['\\', '/']);
+    trimmed.len() == 2 && trimmed.as_bytes()[1] == b':'
 }
 
 pub fn trim_windows_verbatim_prefix(p: &str) -> String {
@@ -301,7 +455,6 @@ pub fn delete_windows_file(path: &str, permanent: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Send to Windows Recycle Bin via PowerShell Microsoft.VisualBasic.FileIO
     let escaped = path.replace('\'', "''");
     let script = format!(
         "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('{}', 'OnlyErrorDialogs', 'SendToRecycleBin')",
@@ -313,9 +466,6 @@ pub fn delete_windows_file(path: &str, permanent: bool) -> Result<()> {
 
     match status {
         Ok(s) if s.success() => Ok(()),
-        _ => {
-            // Fallback to standard fs::remove_file if RecycleBin invocation fails
-            fs::remove_file(path).with_context(|| format!("Failed to delete file: {}", path))
-        }
+        _ => fs::remove_file(path).with_context(|| format!("Failed to delete file: {}", path)),
     }
 }

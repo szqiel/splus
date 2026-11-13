@@ -9,7 +9,7 @@ use crate::model::{
 };
 use crate::scanner::{
     adb::install_standalone_adb, delete_storage_entry, discover_all_android_devices,
-    scan_and_enrich_target, scan_and_enrich_target_with_options, ScanOptions,
+    scan_and_enrich_target_with_options, ScanOptions,
 };
 use crate::tui::run_interactive_tui;
 
@@ -34,6 +34,10 @@ pub struct Cli {
     /// Maximum folder depth
     #[arg(long, global = true)]
     pub max_depth: Option<usize>,
+
+    /// Include dev folders (node_modules, .git, .cargo) and files under 1 MB on drive roots
+    #[arg(long, global = true)]
+    pub all: bool,
 
     /// Initial search filter when opening UI
     #[arg(short, long)]
@@ -195,22 +199,34 @@ impl From<GroupModeArg> for TreemapMode {
 pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         None => {
-            let (label, kind, entries) = scan_and_enrich_target(
+            let opts = ScanOptions {
+                max_depth: cli.max_depth,
+                include_all: cli.all,
+                show_progress: true,
+                ..Default::default()
+            };
+            let (label, kind, entries) = scan_and_enrich_target_with_options(
                 cli.target.as_deref(),
                 cli.android,
                 cli.device.as_deref(),
-                cli.max_depth,
+                &opts,
             )?;
             run_interactive_tui(label, kind, entries, cli.query)
         }
 
         Some(Commands::Tui { path, query }) => {
             let target = path.or(cli.target);
-            let (label, kind, entries) = scan_and_enrich_target(
+            let opts = ScanOptions {
+                max_depth: cli.max_depth,
+                include_all: cli.all,
+                show_progress: true,
+                ..Default::default()
+            };
+            let (label, kind, entries) = scan_and_enrich_target_with_options(
                 target.as_deref(),
                 cli.android,
                 cli.device.as_deref(),
-                cli.max_depth,
+                &opts,
             )?;
             run_interactive_tui(label, kind, entries, query.or(cli.query))
         }
@@ -246,6 +262,8 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
             let opts = ScanOptions {
                 max_depth: cli.max_depth,
                 skip_hashes: true,
+                include_all: cli.all,
+                show_progress: !json,
                 ..Default::default()
             };
             let (label, kind, entries) = scan_and_enrich_target_with_options(
@@ -332,6 +350,8 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
                 max_depth: cli.max_depth,
                 min_size_bytes: min_mb.map(|mb| mb * 1024 * 1024),
                 skip_hashes: !needs_hashes,
+                include_all: cli.all,
+                show_progress: !json,
                 ..Default::default()
             };
             let (_label, _kind, entries) = scan_and_enrich_target_with_options(
@@ -396,6 +416,8 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
                 min_size_bytes: min_mb.map(|mb| mb * 1024 * 1024),
                 max_age_days: Some(win.max_days()),
                 skip_hashes: true,
+                include_all: cli.all,
+                show_progress: !json,
                 ..Default::default()
             };
             let (_label, _kind, entries) = scan_and_enrich_target_with_options(
@@ -482,11 +504,17 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
 
         Some(Commands::Dupes { path, json }) => {
             let target = path.or(cli.target);
-            let (_label, _kind, entries) = scan_and_enrich_target(
+            let opts = ScanOptions {
+                max_depth: cli.max_depth,
+                include_all: cli.all,
+                show_progress: !json,
+                ..Default::default()
+            };
+            let (_label, _kind, entries) = scan_and_enrich_target_with_options(
                 target.as_deref(),
                 cli.android,
                 cli.device.as_deref(),
-                cli.max_depth,
+                &opts,
             )?;
 
             let clusters = detect_duplicate_clusters(&entries);
@@ -530,6 +558,8 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
             let opts = ScanOptions {
                 max_depth: cli.max_depth,
                 skip_hashes: true,
+                include_all: cli.all,
+                show_progress: !json,
                 ..Default::default()
             };
             let (_label, _kind, entries) = scan_and_enrich_target_with_options(
@@ -579,11 +609,18 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
             permanent,
         }) => {
             let target = path.or(cli.target);
-            let (_label, _kind, entries) = scan_and_enrich_target(
+            let opts = ScanOptions {
+                max_depth: cli.max_depth,
+                skip_hashes: !duplicates,
+                include_all: cli.all,
+                show_progress: true,
+                ..Default::default()
+            };
+            let (_label, _kind, entries) = scan_and_enrich_target_with_options(
                 target.as_deref(),
                 cli.android,
                 cli.device.as_deref(),
-                cli.max_depth,
+                &opts,
             )?;
             let now_unix = chrono::Utc::now().timestamp();
 

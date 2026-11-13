@@ -149,6 +149,21 @@ mod tests {
     }
 
     #[test]
+    fn test_recent_windows_nlp() {
+        let day_res = parse_natural_language_query("added within a day");
+        assert_eq!(day_res.derived_rule.max_age_days, Some(1));
+        assert!(day_res.remaining_keywords.is_empty());
+
+        let week_res = parse_natural_language_query("files added within a week");
+        assert_eq!(week_res.derived_rule.max_age_days, Some(7));
+        assert!(week_res.remaining_keywords.is_empty());
+
+        let month_res = parse_natural_language_query("videos added within a month");
+        assert_eq!(month_res.derived_rule.max_age_days, Some(30));
+        assert!(month_res.derived_rule.categories.contains(&FileCategory::Video));
+    }
+
+    #[test]
     fn test_autotagger_and_smart_filter() {
         let now = 1_800_000_000i64;
         let entries = sample_entries(now);

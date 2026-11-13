@@ -152,6 +152,22 @@ impl AutoTag {
         }
     }
 
+    pub fn priority(&self) -> u8 {
+        match self {
+            Self::Duplicate => 1,
+            Self::Bloated => 2,
+            Self::CacheTemp => 3,
+            Self::Installer => 4,
+            Self::DevArtifact => 5,
+            Self::EmptyFile => 6,
+            Self::Forgotten => 7,
+            Self::BurstPhoto => 8,
+            Self::MessengerMedia => 9,
+            Self::ScreenRecording => 10,
+            Self::Screenshot => 11,
+        }
+    }
+
     pub fn description(&self) -> &'static str {
         match self {
             Self::Screenshot => "Screenshot",
@@ -192,6 +208,47 @@ impl StorageEntry {
     pub fn days_old(&self, now_unix: i64) -> u64 {
         let diff = (now_unix - self.modified_unix).max(0) as u64;
         diff / 86_400
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecentWindow {
+    Day,
+    Week,
+    Month,
+}
+
+impl RecentWindow {
+    pub fn max_days(&self) -> u64 {
+        match self {
+            Self::Day => 1,
+            Self::Week => 7,
+            Self::Month => 30,
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Day => Self::Week,
+            Self::Week => Self::Month,
+            Self::Month => Self::Day,
+        }
+    }
+
+    pub fn short_label(&self) -> &'static str {
+        match self {
+            Self::Day => "24h",
+            Self::Week => "7d",
+            Self::Month => "30d",
+        }
+    }
+
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::Day => "Within a day (24h)",
+            Self::Week => "Within a week (7d)",
+            Self::Month => "Within a month (30d)",
+        }
     }
 }
 

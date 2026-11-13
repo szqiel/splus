@@ -20,7 +20,8 @@ use crate::engine::junk::scan_junk_buckets;
 use crate::engine::treemap::{build_terminal_treemap, TreemapMode};
 use crate::model::{
     format_bytes, AndroidDevice, AutoTag, DuplicateCluster, FileCategory, JunkBucket,
-    ParsedNlpResult, SafetyLevel, SmartFilterRule, StorageEntry, StorageTargetKind, TreemapRect,
+    ParsedNlpResult, RecentWindow, SafetyLevel, SmartFilterRule, SortBy, StorageEntry,
+    StorageTargetKind, TreemapRect,
 };
 use crate::scanner::{delete_storage_entry, discover_all_android_devices};
 
@@ -34,6 +35,7 @@ pub enum FocusPane {
 pub enum SidebarItem {
     AllFiles,
     VisualMap,
+    RecentlyAdded,
     Duplicates,
     TempAndJunk,
     OldAndUnused,
@@ -44,9 +46,10 @@ pub enum SidebarItem {
 }
 
 impl SidebarItem {
-    pub const ALL: [SidebarItem; 9] = [
+    pub const ALL: [SidebarItem; 10] = [
         Self::AllFiles,
         Self::VisualMap,
+        Self::RecentlyAdded,
         Self::Duplicates,
         Self::TempAndJunk,
         Self::OldAndUnused,
@@ -60,6 +63,7 @@ impl SidebarItem {
         match self {
             Self::AllFiles => "All Files",
             Self::VisualMap => "Visual Map",
+            Self::RecentlyAdded => "Recently Added",
             Self::Duplicates => "Duplicates",
             Self::TempAndJunk => "Temp & Junk",
             Self::OldAndUnused => "Old & Unused",
@@ -100,6 +104,7 @@ pub struct TuiApp {
     pub focus: FocusPane,
     pub sidebar_cursor: usize,
     pub active_sidebar: SidebarItem,
+    pub recent_window: RecentWindow,
     pub modal: ModalState,
 
     pub rule: SmartFilterRule,
@@ -146,6 +151,7 @@ impl TuiApp {
             focus: FocusPane::Main,
             sidebar_cursor: 0,
             active_sidebar: SidebarItem::AllFiles,
+            recent_window: RecentWindow::Week,
             modal: ModalState::None,
             rule,
             matched_indices: Vec::new(),
@@ -192,6 +198,10 @@ impl TuiApp {
 
         match item {
             SidebarItem::AllFiles | SidebarItem::VisualMap => {}
+            SidebarItem::RecentlyAdded => {
+                next_rule.max_age_days = Some(self.recent_window.max_days());
+                next_rule.sort_by = SortBy::SizeDesc;
+            }
             SidebarItem::Duplicates => {
                 next_rule.only_duplicates = true;
             }
@@ -220,9 +230,23 @@ impl TuiApp {
         self.recompute_all();
     }
 
+    pub fn cycle_recent_window(&mut self) {
+        self.recent_window = self.recent_window.next();
+        if self.active_sidebar == SidebarItem::RecentlyAdded {
+            self.apply_sidebar_item(SidebarItem::RecentlyAdded);
+        }
+        self.notice = Some(format!("Recent filter: {}", self.recent_window.title()));
+    }
+
     pub fn sidebar_item_bytes(&self, item: SidebarItem) -> u64 {
         match item {
             SidebarItem::AllFiles | SidebarItem::VisualMap => self.total_bytes(),
+            SidebarItem::RecentlyAdded => self
+                .entries
+                .iter()
+                .filter(|e| e.days_old(self.now_unix) <= self.recent_window.max_days())
+                .map(|e| e.size_bytes)
+                .sum(),
             SidebarItem::Duplicates => self
                 .duplicate_clusters
                 .iter()
@@ -618,6 +642,11 @@ fn handle_pane_keys(app: &mut TuiApp, code: KeyCode) {
                     app.apply_sidebar_item(SidebarItem::ALL[app.sidebar_cursor]);
                 }
             }
+            KeyCode::Char('t') => {
+                app.sidebar_cursor = 2; // RecentlyAdded
+                app.active_sidebar = SidebarItem::RecentlyAdded;
+                app.cycle_recent_window();
+            }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                 app.apply_sidebar_item(SidebarItem::ALL[app.sidebar_cursor]);
                 app.focus = FocusPane::Main;
@@ -735,6 +764,14 @@ fn handle_pane_keys(app: &mut TuiApp, code: KeyCode) {
                     KeyCode::Char('s') => {
                         app.rule.sort_by = app.rule.sort_by.next();
                         app.recompute_all();
+                    }
+                    KeyCode::Char('t') => {
+                        if app.active_sidebar != SidebarItem::RecentlyAdded {
+                            app.sidebar_cursor = 2;
+                            app.apply_sidebar_item(SidebarItem::RecentlyAdded);
+                        } else {
+                            app.cycle_recent_window();
+                        }
                     }
                     KeyCode::Enter => {
                         if !app.staged_ids.is_empty() {

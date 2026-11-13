@@ -48,6 +48,14 @@ fn is_stop_word(word: &str) -> bool {
             | "search"
             | "filter"
             | "list"
+            | "added"
+            | "within"
+            | "most"
+            | "latest"
+            | "newest"
+            | "a"
+            | "an"
+            | "to"
     )
 }
 
@@ -160,14 +168,16 @@ pub fn parse_natural_language_query(query: &str) -> ParsedNlpResult {
         },
     );
 
-    // 5. Recent / max age: "last 7 days", "past 30 days", "last month", "last week", "recent"
+    // 5. Recent / max age: "within a day/week/month", "last 7 days", "past 30 days", "today", "recent"
     consume_pattern(
         &mut working,
-        r"(?i)\b(?:in\s+the\s+)?(?:last|past)\s+(\d+)\s*(day|days|week|weeks|month|months)\b",
+        r"(?i)\b(?:in\s+the\s+|within\s+(?:the\s+)?)?(?:last|past|within)\s+(\d+)\s*(hour|hours|hr|hrs|h|day|days|d|week|weeks|w|month|months|mo)\b",
         |cap| {
-            let count: u64 = cap[1].parse().unwrap_or(0);
+            let count: u64 = cap[1].parse().unwrap_or(1);
             let unit = cap[2].to_ascii_lowercase();
-            let days = if unit.starts_with('w') {
+            let days = if unit.starts_with('h') {
+                (count / 24).max(1)
+            } else if unit.starts_with('w') {
                 count * 7
             } else if unit.starts_with('m') {
                 count * 30
@@ -185,12 +195,12 @@ pub fn parse_natural_language_query(query: &str) -> ParsedNlpResult {
 
     consume_pattern(
         &mut working,
-        r"(?i)\b(?:last\s+week|this\s+week|recent|recently|new)\b",
+        r"(?i)\b(?:within\s+(?:a|one)\s+day|last\s+day|past\s+day|today|yesterday|just\s+added)\b",
         |cap| {
-            rule.max_age_days = Some(7);
+            rule.max_age_days = Some(1);
             tokens.push(ParsedNlpToken {
                 raw_text: cap[0].trim().to_string(),
-                label: "Recent (<= 7d)".to_string(),
+                label: "Within 24h (<= 1d)".to_string(),
                 token_kind: "age".to_string(),
             });
         },
@@ -198,14 +208,29 @@ pub fn parse_natural_language_query(query: &str) -> ParsedNlpResult {
 
     consume_pattern(
         &mut working,
-        r"(?i)\b(?:last\s+month|this\s+month)\b",
+        r"(?i)\b(?:within\s+(?:a|one)\s+month|last\s+month|this\s+month|past\s+month)\b",
         |cap| {
             rule.max_age_days = Some(30);
             tokens.push(ParsedNlpToken {
                 raw_text: cap[0].trim().to_string(),
-                label: "Last 30d".to_string(),
+                label: "Within 30d".to_string(),
                 token_kind: "age".to_string(),
             });
+        },
+    );
+
+    consume_pattern(
+        &mut working,
+        r"(?i)\b(?:within\s+(?:a|one)\s+week|last\s+week|this\s+week|past\s+week|recent|recently|new)\b",
+        |cap| {
+            if rule.max_age_days.is_none() {
+                rule.max_age_days = Some(7);
+                tokens.push(ParsedNlpToken {
+                    raw_text: cap[0].trim().to_string(),
+                    label: "Within 7d".to_string(),
+                    token_kind: "age".to_string(),
+                });
+            }
         },
     );
 

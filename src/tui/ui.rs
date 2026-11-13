@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use crate::model::{format_age, format_bytes, FileCategory};
+use crate::model::{format_age, format_bytes, AutoTag, FileCategory, RecentWindow};
 use crate::tui::{FocusPane, ModalState, SidebarItem, TuiApp, QUICK_CARDS};
 
 const BORDER_IDLE: Color = Color::Rgb(52, 56, 64);
@@ -17,6 +17,17 @@ const ACCENT_CORAL: Color = Color::Rgb(242, 109, 109);
 const ACCENT_AMBER: Color = Color::Rgb(240, 185, 75);
 const ACCENT_BLUE: Color = Color::Rgb(105, 165, 245);
 const ACCENT_PURPLE: Color = Color::Rgb(178, 132, 240);
+
+fn tag_color(tag: AutoTag) -> Color {
+    match tag {
+        AutoTag::Duplicate | AutoTag::Bloated => ACCENT_CORAL,
+        AutoTag::Forgotten | AutoTag::BurstPhoto => ACCENT_AMBER,
+        AutoTag::CacheTemp | AutoTag::Installer | AutoTag::DevArtifact | AutoTag::EmptyFile => {
+            ACCENT_MINT
+        }
+        AutoTag::Screenshot | AutoTag::ScreenRecording | AutoTag::MessengerMedia => TEXT_MUTED,
+    }
+}
 
 fn card_accent(cat: FileCategory) -> Color {
     match cat {
@@ -172,7 +183,11 @@ fn draw_sidebar(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             format_bytes(app.sidebar_item_bytes(item))
         };
 
-        let label = item.label();
+        let label = if item == SidebarItem::RecentlyAdded {
+            format!("Recent ({})", app.recent_window.short_label())
+        } else {
+            item.label().to_string()
+        };
         let pad_len = (inner.width as usize)
             .saturating_sub(dot.chars().count() + label.len() + size_str.len() + 1);
         let spaces = " ".repeat(pad_len);
@@ -251,12 +266,7 @@ fn draw_file_list_pane(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         ])
         .split(inner);
 
-    // 1. Clean Prompt Header Bar (inspired by `> Sure! ...` in Screenshot #2)
-    let title_text = if !app.rule.search_query.is_empty() {
-        format!(" > {}", app.rule.search_query)
-    } else {
-        format!(" > {}", app.active_sidebar.label())
-    };
+    // 1. Clean Prompt Header Bar
     let right_meta = format!(
         "{} items ({}) • {} ",
         app.matched_indices.len(),
@@ -264,18 +274,58 @@ fn draw_file_list_pane(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         app.rule.sort_by.label()
     );
 
-    let pad = (chunks[0].width as usize)
-        .saturating_sub(title_text.chars().count() + right_meta.chars().count());
-    let prompt_line = Line::from(vec![
-        Span::styled(
-            title_text,
+    let prompt_line = if app.active_sidebar == SidebarItem::RecentlyAdded
+        && app.rule.search_query.is_empty()
+    {
+        let mut left_spans = vec![Span::styled(
+            " > Recently Added  ",
             Style::default().fg(TEXT_MAIN).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" ".repeat(pad)),
-        Span::styled(right_meta, Style::default().fg(TEXT_MUTED)),
-    ]);
+        )];
+        let windows = [
+            (RecentWindow::Day, " 24h "),
+            (RecentWindow::Week, " 7d "),
+            (RecentWindow::Month, " 30d "),
+        ];
+        for (w, lbl) in windows {
+            if app.recent_window == w {
+                left_spans.push(Span::styled(
+                    lbl,
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(ACCENT_MINT)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                left_spans.push(Span::styled(lbl, Style::default().fg(TEXT_MUTED)));
+            }
+            left_spans.push(Span::raw(" "));
+        }
+        left_spans.push(Span::styled("(t switch)", Style::default().fg(TEXT_DIM)));
+
+        let left_len: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
+        let pad = (chunks[0].width as usize).saturating_sub(left_len + right_meta.chars().count());
+        left_spans.push(Span::raw(" ".repeat(pad)));
+        left_spans.push(Span::styled(right_meta, Style::default().fg(TEXT_MUTED)));
+        Line::from(left_spans)
+    } else {
+        let title_text = if !app.rule.search_query.is_empty() {
+            format!(" > {}", app.rule.search_query)
+        } else {
+            format!(" > {}", app.active_sidebar.label())
+        };
+        let pad = (chunks[0].width as usize)
+            .saturating_sub(title_text.chars().count() + right_meta.chars().count());
+        Line::from(vec![
+            Span::styled(
+                title_text,
+                Style::default().fg(TEXT_MAIN).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(right_meta, Style::default().fg(TEXT_MUTED)),
+        ])
+    };
     f.render_widget(
-        Paragraph::new(prompt_line). style(Style::default().bg(Color::Rgb(28, 30, 36))),
+        Paragraph::new(prompt_line).style(Style::default().bg(Color::Rgb(28, 30, 36))),
         chunks[0],
     );
 
@@ -322,14 +372,8 @@ fn draw_file_list_pane(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                 Span::styled(" ○  ", Style::default().fg(TEXT_DIM))
             };
 
-            let tag_str = e
-                .auto_tags
-                .first()
-                .map(|t| format!("  {}", t.tag_str()))
-                .unwrap_or_default();
-
             let size_str = format!("{} ", format_bytes(e.size_bytes));
-            let used_w = 4 + e.name.chars().count() + tag_str.chars().count() + size_str.len();
+            let used_w = 4 + e.name.chars().count() + size_str.len();
             let pad_w = (chunks[1].width as usize).saturating_sub(used_w);
 
             let name_style = if is_cursor {
@@ -351,7 +395,6 @@ fn draw_file_list_pane(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             let line1 = Line::from(vec![
                 icon,
                 Span::styled(&e.name, name_style),
-                Span::styled(tag_str, Style::default().fg(ACCENT_BLUE)),
                 Span::raw(" ".repeat(pad_w)),
                 Span::styled(
                     size_str,
@@ -361,12 +404,25 @@ fn draw_file_list_pane(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                 ),
             ]);
 
-            let sub_text = format!(
-                "    {} • {}",
-                e.parent_folder,
-                format_age(e.days_old(app.now_unix))
-            );
-            let line2 = Line::from(Span::styled(sub_text, Style::default().fg(TEXT_DIM)));
+            let mut line2_spans = vec![Span::styled(
+                format!(
+                    "    {} • {}",
+                    e.parent_folder,
+                    format_age(e.days_old(app.now_unix))
+                ),
+                Style::default().fg(TEXT_DIM),
+            )];
+
+            for (ti, &tag) in e.auto_tags.iter().take(2).enumerate() {
+                let sep = if ti == 0 { " • " } else { " · " };
+                line2_spans.push(Span::styled(sep, Style::default().fg(TEXT_DIM)));
+                line2_spans.push(Span::styled(
+                    tag.tag_str(),
+                    Style::default().fg(tag_color(tag)),
+                ));
+            }
+
+            let line2 = Line::from(line2_spans);
 
             ListItem::new(vec![line1, line2]).style(row_bg)
         })

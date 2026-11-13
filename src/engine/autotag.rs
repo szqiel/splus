@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use regex::Regex;
 
@@ -8,6 +9,8 @@ const MB: u64 = 1024 * 1024;
 
 /// Normalizes a filename to detect renamed copies like "report (1).pdf", "video_copy.mp4", or "photo - Copy (2).jpg".
 pub fn normalize_base_filename(name: &str) -> String {
+    static DUP_SUFFIX_RE: OnceLock<Regex> = OnceLock::new();
+
     let (stem, ext) = match name.rfind('.') {
         Some(idx) if idx > 0 => (&name[..idx], &name[idx..]),
         _ => (name, ""),
@@ -17,8 +20,10 @@ pub fn normalize_base_filename(name: &str) -> String {
     let lower_ext = ext.to_ascii_lowercase();
 
     // Strip common duplicate suffixes: " (1)", " - copy", "_copy", "_1"
-    let re = Regex::new(r"(?i)(\s*\(\d+\)|\s*[-_]\s*copy(?:\s*\(\d+\)|\s*\d+)?|[-_]copy\d*)$")
-        .expect("valid regex");
+    let re = DUP_SUFFIX_RE.get_or_init(|| {
+        Regex::new(r"(?i)(\s*\(\d+\)|\s*[-_]\s*copy(?:\s*\(\d+\)|\s*\d+)?|[-_]copy\d*)$")
+            .expect("valid regex")
+    });
     let cleaned = re.replace_all(lower_stem.trim(), "").trim().to_string();
 
     format!("{}{}", cleaned, lower_ext)
@@ -226,5 +231,9 @@ pub fn enrich_entries_with_autotags(entries: &mut [StorageEntry], now_unix: i64)
         if !entries[idx].auto_tags.contains(&AutoTag::BurstPhoto) {
             entries[idx].auto_tags.push(AutoTag::BurstPhoto);
         }
+    }
+
+    for entry in entries.iter_mut() {
+        entry.auto_tags.sort_by_key(|t| t.priority());
     }
 }

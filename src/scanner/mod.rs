@@ -11,6 +11,15 @@ use crate::engine::autotag::enrich_entries_with_autotags;
 use crate::engine::duplicates::populate_hashes_for_size_collisions;
 use crate::model::{AndroidDevice, StorageEntry, StorageTargetKind};
 
+#[derive(Debug, Clone, Default)]
+pub struct ScanOptions {
+    pub max_depth: Option<usize>,
+    pub min_size_bytes: Option<u64>,
+    pub max_age_days: Option<u64>,
+    pub skip_hashes: bool,
+    pub include_system: bool,
+}
+
 /// Discovers all connected Android USB devices across both ADB and Windows MTP.
 pub fn discover_all_android_devices() -> Vec<AndroidDevice> {
     let mut all = adb::list_adb_devices();
@@ -27,7 +36,25 @@ pub fn scan_and_enrich_target(
     device_serial: Option<&str>,
     max_depth: Option<usize>,
 ) -> Result<(String, StorageTargetKind, Vec<StorageEntry>)> {
+    scan_and_enrich_target_with_options(
+        target,
+        use_android,
+        device_serial,
+        &ScanOptions {
+            max_depth,
+            ..Default::default()
+        },
+    )
+}
+
+pub fn scan_and_enrich_target_with_options(
+    target: Option<&str>,
+    use_android: bool,
+    device_serial: Option<&str>,
+    opts: &ScanOptions,
+) -> Result<(String, StorageTargetKind, Vec<StorageEntry>)> {
     let raw_target = target.unwrap_or("");
+    let max_depth = opts.max_depth;
 
     let (label, kind, mut entries) = if use_android
         || raw_target.starts_with("adb://")
@@ -103,7 +130,7 @@ pub fn scan_and_enrich_target(
         if !local_path.exists() {
             bail!("Path does not exist: {}", local_path.display());
         }
-        let list = windows::scan_windows_directory(&local_path, max_depth)?;
+        let list = windows::scan_windows_directory_with_options(&local_path, opts)?;
         let display = windows::trim_windows_verbatim_prefix(
             &local_path
                 .canonicalize()
@@ -113,9 +140,11 @@ pub fn scan_and_enrich_target(
         (display, StorageTargetKind::WindowsLocal, list)
     };
 
-    // Enrich with two-stage duplicate hashes and offline heuristic auto-tags
+    // Enrich with two-stage duplicate hashes (when needed) and offline heuristic auto-tags
     let now_unix = chrono::Utc::now().timestamp();
-    populate_hashes_for_size_collisions(&mut entries);
+    if !opts.skip_hashes {
+        populate_hashes_for_size_collisions(&mut entries);
+    }
     enrich_entries_with_autotags(&mut entries, now_unix);
 
     Ok((label, kind, entries))

@@ -52,9 +52,16 @@ pub fn compute_local_blake3_hash(path: &str, size_bytes: u64) -> Option<String> 
 /// Populates content hashes only for entries that share an identical `size_bytes` with at least one other file.
 /// This two-stage strategy skips >90% of disk/USB I/O.
 pub fn populate_hashes_for_size_collisions(entries: &mut [StorageEntry]) {
+    // On massive scans (>15,000 files), only hash colliding files >= 512 KB to avoid thousands of tiny disk reads
+    let min_hash_size = if entries.len() > 15_000 {
+        512 * 1024
+    } else {
+        1
+    };
+
     let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
     for (idx, entry) in entries.iter().enumerate() {
-        if entry.size_bytes > 0 {
+        if entry.size_bytes >= min_hash_size {
             by_size.entry(entry.size_bytes).or_default().push(idx);
         }
     }

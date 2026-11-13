@@ -5,11 +5,11 @@ use crate::engine::filter::evaluate_smart_filter;
 use crate::engine::junk::scan_junk_buckets;
 use crate::engine::treemap::{build_terminal_treemap, render_ascii_treemap, TreemapMode};
 use crate::model::{
-    format_age, format_bytes, FileCategory, SmartFilterRule, SortBy, StorageEntry,
+    format_age, format_bytes, FileCategory, RecentWindow, SmartFilterRule, SortBy, StorageEntry,
 };
 use crate::scanner::{
     adb::install_standalone_adb, delete_storage_entry, discover_all_android_devices,
-    scan_and_enrich_target,
+    scan_and_enrich_target, scan_and_enrich_target_with_options, ScanOptions,
 };
 use crate::tui::run_interactive_tui;
 
@@ -90,6 +90,28 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Show recently added files (within a day, a week, or a month)
+    Recent {
+        /// Time window: day (24h), week (7d), or month (30d)
+        #[arg(value_enum, default_value_t = RecentWindowArg::Week)]
+        window: RecentWindowArg,
+        /// Optional folder path on Windows or Android
+        #[arg(short, long)]
+        path: Option<String>,
+        /// Minimum file size in MB
+        #[arg(long)]
+        min_mb: Option<u64>,
+        /// Sort by newest timestamp first instead of largest size first
+        #[arg(long)]
+        newest: bool,
+        /// Max results to show
+        #[arg(short, long, default_value_t = 25)]
+        limit: usize,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Find duplicate files and extra copies
     Dupes {
         /// Folder path on Windows or Android
@@ -134,6 +156,23 @@ pub enum Commands {
 
     /// Download standalone Android USB tool (adb.exe)
     AdbSetup,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+pub enum RecentWindowArg {
+    Day,
+    Week,
+    Month,
+}
+
+impl From<RecentWindowArg> for RecentWindow {
+    fn from(val: RecentWindowArg) -> Self {
+        match val {
+            RecentWindowArg::Day => RecentWindow::Day,
+            RecentWindowArg::Week => RecentWindow::Week,
+            RecentWindowArg::Month => RecentWindow::Month,
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -204,11 +243,16 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
             json,
         }) => {
             let target = path.or(cli.target);
-            let (label, kind, entries) = scan_and_enrich_target(
+            let opts = ScanOptions {
+                max_depth: cli.max_depth,
+                skip_hashes: true,
+                ..Default::default()
+            };
+            let (label, kind, entries) = scan_and_enrich_target_with_options(
                 target.as_deref(),
                 cli.android,
                 cli.device.as_deref(),
-                cli.max_depth,
+                &opts,
             )?;
 
             if json {
@@ -282,11 +326,19 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
             json,
         }) => {
             let target = path.or(cli.target);
-            let (_label, _kind, entries) = scan_and_enrich_target(
+            let q_lower = nl_query.to_ascii_lowercase();
+            let needs_hashes = q_lower.contains("dup") || q_lower.contains("copy") || q_lower.contains("copies");
+            let opts = ScanOptions {
+                max_depth: cli.max_depth,
+                min_size_bytes: min_mb.map(|mb| mb * 1024 * 1024),
+                skip_hashes: !needs_hashes,
+                ..Default::default()
+            };
+            let (_label, _kind, entries) = scan_and_enrich_target_with_options(
                 target.as_deref(),
                 cli.android,
                 cli.device.as_deref(),
-                cli.max_depth,
+                &opts,
             )?;
 
             let now_unix = chrono::Utc::now().timestamp();
@@ -324,6 +376,105 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
                 println!("  No matching files found.\n");
             } else {
                 print_minimal_file_list(&matched_entries[..limit.min(matched_entries.len())], now_unix);
+                println!();
+            }
+            Ok(())
+        }
+
+        Some(Commands::Recent {
+            window,
+            path,
+            min_mb,
+            newest,
+            limit,
+            json,
+        }) => {
+            let target = path.or(cli.target);
+            let win: RecentWindow = window.into();
+            let opts = ScanOptions {
+                max_depth: cli.max_depth,
+                min_size_bytes: min_mb.map(|mb| mb * 1024 * 1024),
+                max_age_days: Some(win.max_days()),
+                skip_hashes: true,
+                ..Default::default()
+            };
+            let (_label, _kind, entries) = scan_and_enrich_target_with_options(
+                target.as_deref(),
+                cli.android,
+                cli.device.as_deref(),
+                &opts,
+            )?;
+
+            let now_unix = chrono::Utc::now().timestamp();
+            let rule = SmartFilterRule {
+                max_age_days: Some(win.max_days()),
+                min_size_bytes: min_mb.map(|mb| mb * 1024 * 1024),
+                sort_by: if newest {
+                    SortBy::AgeAsc
+                } else {
+                    SortBy::SizeDesc
+                },
+                ..Default::default()
+            };
+
+            let (matched_indices, matched_bytes, _) =
+                evaluate_smart_filter(&entries, &rule, now_unix);
+
+            let matched_entries: Vec<StorageEntry> =
+                matched_indices.iter().map(|&i| entries[i].clone()).collect();
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&matched_entries)?);
+                return Ok(());
+            }
+
+            println!(
+                "\n  > Recently Added • {}   ({} files • {})\n",
+                win.title(),
+                matched_entries.len(),
+                format_bytes(matched_bytes)
+            );
+
+            if matched_entries.is_empty() {
+                println!("  No files added in this time window.\n");
+            } else {
+                // Show Top Recent Folders so the user immediately sees which app/folder ate their space
+                let mut folder_totals: std::collections::HashMap<&str, (u64, usize)> =
+                    std::collections::HashMap::new();
+                for e in &matched_entries {
+                    let item = folder_totals.entry(e.parent_folder.as_str()).or_insert((0, 0));
+                    item.0 += e.size_bytes;
+                    item.1 += 1;
+                }
+                let mut top_folders: Vec<(&str, u64, usize)> = folder_totals
+                    .into_iter()
+                    .map(|(f, (b, c))| (f, b, c))
+                    .collect();
+                top_folders.sort_by(|a, b| b.1.cmp(&a.1));
+
+                println!("  Top Recent Folders");
+                for (folder, bytes, count) in top_folders.iter().take(6) {
+                    println!(
+                        "  {:>9}   {}  ({} files)",
+                        format_bytes(*bytes),
+                        folder,
+                        count
+                    );
+                }
+                println!();
+
+                println!(
+                    "  {}",
+                    if newest {
+                        "Newest Files"
+                    } else {
+                        "Largest Recent Files"
+                    }
+                );
+                print_minimal_file_list(
+                    &matched_entries[..limit.min(matched_entries.len())],
+                    now_unix,
+                );
                 println!();
             }
             Ok(())
@@ -376,11 +527,16 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
 
         Some(Commands::Junk { path, json }) => {
             let target = path.or(cli.target);
-            let (_label, _kind, entries) = scan_and_enrich_target(
+            let opts = ScanOptions {
+                max_depth: cli.max_depth,
+                skip_hashes: true,
+                ..Default::default()
+            };
+            let (_label, _kind, entries) = scan_and_enrich_target_with_options(
                 target.as_deref(),
                 cli.android,
                 cli.device.as_deref(),
-                cli.max_depth,
+                &opts,
             )?;
 
             let now_unix = chrono::Utc::now().timestamp();
@@ -522,18 +678,19 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
 
 fn print_minimal_file_list(entries: &[StorageEntry], now_unix: i64) {
     for e in entries {
-        let tag = e
-            .auto_tags
-            .first()
-            .map(|t| format!(" [{}]", t.tag_str()))
-            .unwrap_or_default();
+        let tags: Vec<&str> = e.auto_tags.iter().take(2).map(|t| t.tag_str()).collect();
+        let tags_str = if tags.is_empty() {
+            String::new()
+        } else {
+            format!(" • {}", tags.join(" · "))
+        };
         println!(
             "  {:>9}   {:<36}  {} • {}{}",
             format_bytes(e.size_bytes),
             e.name,
             e.parent_folder,
             format_age(e.days_old(now_unix)),
-            tag
+            tags_str
         );
     }
 }

@@ -11,7 +11,7 @@ use crate::scanner::{
     adb::install_standalone_adb, delete_storage_entry, discover_all_android_devices,
     scan_and_enrich_target_with_options, ScanOptions,
 };
-use crate::tui::run_interactive_tui;
+use crate::tui::{run_interactive_tui, run_interactive_tui_recent};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -108,7 +108,10 @@ pub enum Commands {
         /// Sort by newest timestamp first instead of largest size first
         #[arg(long)]
         newest: bool,
-        /// Max results to show
+        /// Print list to terminal instead of opening interactive UI
+        #[arg(short = 'P', long)]
+        print: bool,
+        /// Max results to show when using --print
         #[arg(short, long, default_value_t = 25)]
         limit: usize,
         /// Output JSON
@@ -406,6 +409,7 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
             path,
             min_mb,
             newest,
+            print,
             limit,
             json,
         }) => {
@@ -420,12 +424,16 @@ pub fn execute_cli(cli: Cli) -> anyhow::Result<()> {
                 show_progress: !json,
                 ..Default::default()
             };
-            let (_label, _kind, entries) = scan_and_enrich_target_with_options(
+            let (label, kind, entries) = scan_and_enrich_target_with_options(
                 target.as_deref(),
                 cli.android,
                 cli.device.as_deref(),
                 &opts,
             )?;
+
+            if !print && !json {
+                return run_interactive_tui_recent(label, kind, entries, win, min_mb, newest);
+            }
 
             let now_unix = chrono::Utc::now().timestamp();
             let rule = SmartFilterRule {

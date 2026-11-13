@@ -327,6 +327,19 @@ pub fn build_entry_from_meta(
         .unwrap_or(modified_unix);
 
     let name = path.file_name()?.to_string_lossy().to_string();
+    if !opts.include_all {
+        let lower_name = name.to_ascii_lowercase();
+        if matches!(
+            lower_name.as_str(),
+            "pagefile.sys"
+                | "hiberfil.sys"
+                | "swapfile.sys"
+                | "dumpstack.log"
+                | "dumpstack.log.tmp"
+        ) {
+            return None;
+        }
+    }
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())

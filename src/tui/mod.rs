@@ -443,13 +443,43 @@ pub fn run_interactive_tui(
     entries: Vec<StorageEntry>,
     initial_query: Option<String>,
 ) -> Result<()> {
+    let app = TuiApp::new(target_label, target_kind, entries, initial_query);
+    launch_tui_app(app)
+}
+
+pub fn run_interactive_tui_recent(
+    target_label: String,
+    target_kind: StorageTargetKind,
+    entries: Vec<StorageEntry>,
+    window: RecentWindow,
+    min_mb: Option<u64>,
+    newest: bool,
+) -> Result<()> {
+    let mut app = TuiApp::new(target_label, target_kind, entries, None);
+    app.sidebar_cursor = 2;
+    app.active_sidebar = SidebarItem::RecentlyAdded;
+    app.recent_window = window;
+    app.rule = SmartFilterRule {
+        max_age_days: Some(window.max_days()),
+        min_size_bytes: min_mb.map(|mb| mb * 1024 * 1024),
+        sort_by: if newest {
+            SortBy::AgeAsc
+        } else {
+            SortBy::SizeDesc
+        },
+        ..Default::default()
+    };
+    app.recompute_all();
+    launch_tui_app(app)
+}
+
+fn launch_tui_app(mut app: TuiApp) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = TuiApp::new(target_label, target_kind, entries, initial_query);
     let res = run_event_loop(&mut terminal, &mut app);
 
     disable_raw_mode()?;

@@ -1,0 +1,19 @@
+# Rust / Cargo build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Standalone downloaded Android platform-tools (adb.exe)
+/tools/
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.log
+
+# Environment files
+.env
+.env.*
